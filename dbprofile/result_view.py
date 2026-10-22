@@ -4,9 +4,9 @@ import datetime
 import decimal
 
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QPointF, QRect, QRectF, QSize, Qt
-from PyQt6.QtGui import QAction, QBrush, QColor, QFont, QFontMetrics, QKeySequence, QPalette, QPen
+from PyQt6.QtGui import QAction, QBrush, QColor, QFont, QFontMetrics, QKeySequence, QPen
 from PyQt6.QtWidgets import (
-    QApplication, QFileDialog, QHeaderView, QMenu, QMessageBox, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
+    QApplication, QFileDialog, QHeaderView, QMenu, QMessageBox, QStyle, QStyledItemDelegate,
     QTableView,
 )
 
@@ -14,12 +14,17 @@ from . import theme
 
 NULL_TEXT = "(NULL)"
 TYPE_ROLE = Qt.ItemDataRole.UserRole + 1  # headerData: the column's type name, e.g. "int"
+LEFT = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+RIGHT = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+NULL_COLOR = QColor(140, 140, 140)
 
 # Navicat-style grid: white headers, the current row tinted, the current cell solid blue.
 HEADER_BG = QColor("#ffffff")
 HEADER_LINE = QColor("#e3e3e3")
 CURRENT_TINT = QColor("#dcebfd")
 SELECTED_CELL = QColor("#3d8af7")
+WHITE = QColor("#ffffff")
+TEXT_COLOR = QColor(theme.TEXT)
 TYPE_COLOR = QColor("#8a8a8a")
 NUMBER_TYPES = {"tinyint", "smallint", "mediumint", "int", "bigint", "decimal", "float", "double", "year", "bit"}
 DATE_TYPES = {"date", "time", "datetime", "timestamp"}
@@ -86,6 +91,18 @@ class ResultModel(QAbstractTableModel):
             return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return None
 
+    def paint_info(self, row, col):
+        """(text, alignment, text color, background, font) for GridDelegate, in one call instead of one per role."""
+        value = self.rows[row][col]
+        if value is None:
+            return NULL_TEXT, LEFT, NULL_COLOR, None, self._italic
+        text = display_value(value)
+        if len(text) > 300:
+            text = text[:300] + "…"
+        if "\n" in text or "\r" in text or "\t" in text:
+            text = " ".join(text.split())  # one line per cell, like Navicat
+        return text, RIGHT if isinstance(value, (int, float, decimal.Decimal)) else LEFT, None, None, None
+
     def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
         if role == TYPE_ROLE and orientation == Qt.Orientation.Horizontal:
             return self.types[section] if section < len(self.types) else None
@@ -102,6 +119,8 @@ class EditableResultModel(ResultModel):
     def __init__(self, parent=None):
         super().__init__(parent=parent)
         self.editable = False
+        self._strike = QFont()
+        self._strike.setStrikeOut(True)
         self.reset_changes()
 
     def set_data(self, columns, rows, types=None):
@@ -138,6 +157,16 @@ class EditableResultModel(ResultModel):
             font.setStrikeOut(True)
             return font
         return super().data(index, role)
+
+    def paint_info(self, row, col):
+        text, align, color, background, font = super().paint_info(row, col)
+        if row in self.deleted_rows:
+            background, font = DELETED_ROW_COLOR, self._strike
+        elif row in self.new_rows:
+            background = NEW_ROW_COLOR
+        elif (row, col) in self.changed:
+            background = CHANGED_CELL_COLOR
+        return text, align, color, background, font
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
         if role != Qt.ItemDataRole.EditRole or not index.isValid():
@@ -325,31 +354,48 @@ class RowHeader(QHeaderView):
 
 
 class GridDelegate(QStyledItemDelegate):
-    """Paints the current row tinted and selected cells solid blue with white text."""
+    """Paints cells directly: the current row tinted, selected cells solid blue with white text.
+
+    A grid can show a thousand cells at once, so this avoids QStyledItemDelegate's generic path
+    (one model call per role plus a stylesheet-aware drawControl per cell), which made every repaint slow.
+    """
+
+    PAD = 6
 
     def paint(self, painter, option, index):
-        opt = QStyleOptionViewItem(option)
-        self.initStyleOption(opt, index)
-        view = self.parent()
-        current = view.currentIndex()
-        # Like Navicat, the current cell is always shown solid blue, with or without a selection.
-        selected = bool(opt.state & QStyle.StateFlag.State_Selected) or index == current
-        background = index.data(Qt.ItemDataRole.BackgroundRole)  # unsaved edit / new / deleted rows
+        model = index.model()
+        info = getattr(model, "paint_info", None)
+        if info is None:
+            return super().paint(painter, option, index)
+        row, col = index.row(), index.column()
+        text, align, color, background, font = info(row, col)
+        rect = option.rect
+        current = self.parent().currentIndex()
+        # Like Navicat, the current cell is always solid blue, with or without a selection.
+        selected = bool(option.state & QStyle.StateFlag.State_Selected) \
+            or (current.row() == row and current.column() == col)
         if selected:
-            painter.fillRect(opt.rect, SELECTED_CELL)
+            painter.fillRect(rect, SELECTED_CELL)
         elif background is not None:
-            painter.fillRect(opt.rect, background)
-        elif current.isValid() and current.row() == index.row():
-            painter.fillRect(opt.rect, CURRENT_TINT)
-        opt.state &= ~QStyle.StateFlag.State_Selected
-        opt.state &= ~QStyle.StateFlag.State_HasFocus
-        opt.backgroundBrush = QBrush()
-        if selected:
-            for role in (QPalette.ColorRole.Text, QPalette.ColorRole.HighlightedText):
-                opt.palette.setColor(role, QColor("#ffffff"))
-        widget = opt.widget
-        (widget.style() if widget else QApplication.style()).drawControl(
-            QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
+            painter.fillRect(rect, background)
+        elif current.row() == row:
+            painter.fillRect(rect, CURRENT_TINT)
+        if not text:
+            return
+        painter.save()
+        if font is not None:
+            font = font.resolve(option.font)  # keep italic / strike-out, take the rest from the view
+            painter.setFont(font)
+            metrics = QFontMetrics(font)
+        else:
+            painter.setFont(option.font)
+            metrics = option.fontMetrics
+        painter.setPen(WHITE if selected else (color or TEXT_COLOR))
+        inner = rect.adjusted(self.PAD, 0, -self.PAD, 0)
+        if metrics.horizontalAdvance(text) > inner.width():
+            text = metrics.elidedText(text, Qt.TextElideMode.ElideRight, inner.width())
+        painter.drawText(inner, align, text)
+        painter.restore()
 
 
 class ResultView(QTableView):
@@ -378,10 +424,19 @@ class ResultView(QTableView):
 
     def currentChanged(self, current, previous):
         super().currentChanged(current, previous)
-        # The whole current row and the current column's header are highlighted, not just the cell.
-        self.viewport().update()
-        self.horizontalHeader().viewport().update()
-        self.verticalHeader().viewport().update()
+        # The whole current row and the current column's header are highlighted, not just the cell:
+        # repaint just the old and new rows and header sections, not the whole grid.
+        width = self.viewport().width()
+        hheader, vheader = self.horizontalHeader(), self.verticalHeader()
+        for index in (previous, current):
+            if not index.isValid():
+                continue
+            row, col = index.row(), index.column()
+            self.viewport().update(QRect(0, self.rowViewportPosition(row), width, self.rowHeight(row)))
+            vheader.viewport().update(QRect(0, vheader.sectionViewportPosition(row), vheader.width(),
+                                            vheader.sectionSize(row)))
+            hheader.viewport().update(QRect(hheader.sectionViewportPosition(col), 0, hheader.sectionSize(col),
+                                            hheader.height()))
 
     def fit_columns(self):
         self.resizeColumnsToContents()
