@@ -178,6 +178,8 @@ class ResultView(QTableView):
         self.setSelectionBehavior(QTableView.SelectionBehavior.SelectItems)
         self.setSortingEnabled(False)
         self.horizontalHeader().setDefaultSectionSize(140)
+        # Size columns from the visible rows plus a sample, not every row: measuring 1,000 rows takes ~0.3 s.
+        self.horizontalHeader().setResizeContentsPrecision(100)
         self.verticalHeader().setDefaultSectionSize(24)
         self.verticalHeader().setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)

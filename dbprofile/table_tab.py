@@ -24,7 +24,13 @@ class TableTab(QWidget):
         self.conn = None
         self.pk: list[str] = []
         self.offset = 0
-        self.total = 0
+        # Row count of the current filter. It is counted in the background after the rows are shown,
+        # because COUNT(*) on a big table can take much longer than fetching one page.
+        self.total: int | None = None
+        self.total_exact = False
+        self._count_gen = 0  # increases with every count, so a stale result is ignored
+        self._count_thread = None  # server thread id of the running count, to cancel it
+        self._last_after_count = False
         self.busy = False
         self.fqn = f"{q(database)}.{q(table)}"
 
@@ -228,7 +234,8 @@ class TableTab(QWidget):
         sql += f" LIMIT {self.limit.value()} OFFSET {self.offset}"
         return sql, count_sql
 
-    def load_data(self):
+    def load_data(self, recount=True):
+        """Fetch the current page. recount=False when only the page changed (the filter is the same)."""
         if self.busy or self.conn is None:
             return
         if self.model.has_changes() and not self._confirm_discard():
@@ -237,20 +244,83 @@ class TableTab(QWidget):
         self.sql_label.setText(sql)
         self.sql_label.setToolTip(sql)
         self._set_busy(True)
+        if recount:
+            self._cancel_count()
+            self.total, self.total_exact = None, False
+        estimate = recount and not self.is_view and not self.where.text().strip()
 
         def fetch():
             rs = db.execute(self.conn, sql, max_rows=self.limit.value())
-            total = db.execute(self.conn, count_sql).rows[0][0]
-            return rs, total
-        run_async(fetch, on_done=self._loaded, on_error=self._error)
+            # Without a filter the server's row estimate is instant; the exact count replaces it later.
+            approx = db.estimated_rows(self.conn, self.database, self.table) if estimate else None
+            return rs, approx
+        run_async(fetch, on_done=lambda result: self._loaded(result, count_sql, recount), on_error=self._error)
 
-    def _loaded(self, result):
-        rs, self.total = result
+    def _loaded(self, result, count_sql, recount):
+        rs, approx = result
         self.model.editable = not self.is_view
         self.model.set_data(rs.columns, rs.rows)
         self.view.fit_columns()
+        if recount:
+            if self.offset == 0 and rs.rowcount < self.limit.value():
+                self.total, self.total_exact = rs.rowcount, True  # everything fits on this page
+            else:
+                if approx is not None:
+                    self.total = max(approx, self.offset + rs.rowcount)
+                self._start_count(count_sql)
         self._set_busy(False)
         self.status(f"{self.table}: {rs.rowcount} row(s) loaded in {rs.elapsed * 1000:.1f} ms")
+
+    # counting rows in the background ----------------------------------------
+    def _start_count(self, count_sql):
+        self._count_gen += 1
+        gen = self._count_gen
+
+        def count():
+            # Own connection: the tab's connection stays free for paging and editing meanwhile.
+            conn = db.connect(self.cfg, self.database)
+            try:
+                if gen != self._count_gen:
+                    return None
+                self._count_thread = conn.thread_id()
+                return db.execute(conn, count_sql).rows[0][0]
+            finally:
+                conn.close()
+
+        def done(total):
+            if gen != self._count_gen or total is None:
+                return
+            self._count_thread = None
+            self.total, self.total_exact = total, True
+            self._update_actions()
+            if self._last_after_count:
+                self._last_after_count = False
+                self._goto(None)
+
+        def failed(err):
+            if gen == self._count_gen:
+                self._count_thread = None
+                self._last_after_count = False
+                self.status(f"{self.table}: could not count rows: {err}")
+                self._update_actions()
+        run_async(count, on_done=done, on_error=failed)
+        self._update_actions()
+
+    def _cancel_count(self):
+        """Stop a running count (its result would be for an old filter) so it doesn't keep the server busy."""
+        self._count_gen += 1
+        self._last_after_count = False
+        thread_id, self._count_thread = self._count_thread, None
+        if thread_id is None:
+            return
+
+        def kill():
+            conn = db.connect(self.cfg)
+            try:
+                db.execute(conn, f"KILL QUERY {int(thread_id)}")
+            finally:
+                conn.close()
+        run_async(kill, on_error=lambda _: None)  # the count may already have finished
 
     def _apply_filter(self):
         self.offset = 0
@@ -258,17 +328,27 @@ class TableTab(QWidget):
 
     def _goto(self, offset):
         limit = self.limit.value()
-        if offset is None:  # last page
+        if offset is None:  # last page: needs the exact count
+            if not self.total_exact:
+                self._last_after_count = True
+                self.status(f"{self.table}: counting rows to find the last page…")
+                self._update_actions()
+                return
             offset = max(0, (self.total - 1) // limit * limit)
         if offset != self.offset:
             self.offset = offset
-            self.load_data()
+            self.load_data(recount=False)
 
     def _page(self, direction):
         new = self.offset + direction * self.limit.value()
-        if 0 <= new < max(self.total, 1):
+        if new >= 0 and (direction < 0 or self._has_next_page()):
             self.offset = new
-            self.load_data()
+            self.load_data(recount=False)
+
+    def _has_next_page(self):
+        if self.total_exact:
+            return self.offset + self.limit.value() < self.total
+        return self.model.rowCount() - len(self.model.new_rows) >= self.limit.value()
 
     # editing ------------------------------------------------------------
     def add_row(self):
@@ -396,23 +476,31 @@ class TableTab(QWidget):
         self.a_discard.setEnabled(editable and changes)
         limit = self.limit.value()
         page = self.offset // limit + 1
-        pages = max(1, -(-self.total // limit))
         shown = self.model.rowCount()
         first = self.offset + 1 if shown else 0
         state = "  ·  unsaved changes" if changes else ("  ·  read only" if self.is_view else "")
-        self.info.setText(f"Records {first}–{self.offset + shown} of {self.total}{state}")
-        self.page_label.setText(f"{page} / {pages}")
+        if self.total_exact:
+            total, pages = f"{self.total:,}", f"{max(1, -(-self.total // limit)):,}"
+        elif self.total is not None:  # server estimate while the exact count runs
+            total, pages = f"~{self.total:,}", f"~{max(1, -(-self.total // limit)):,}"
+        else:
+            total, pages = "…", "…"
+        counting = "" if self.total_exact else "  ·  counting…"
+        self.info.setText(f"Records {first:,}–{self.offset + shown:,} of {total}{counting}{state}")
+        self.info.setToolTip("" if self.total_exact else "The exact number of rows is being counted in the background")
+        self.page_label.setText(f"{page:,} / {pages}")
         can_back = not self.busy and self.offset > 0
-        can_fwd = not self.busy and self.offset + limit < self.total
+        can_fwd = not self.busy and self._has_next_page()
         self.a_first.setEnabled(can_back)
         self.a_prev.setEnabled(can_back)
         self.a_next.setEnabled(can_fwd)
-        self.a_last.setEnabled(can_fwd)
+        self.a_last.setEnabled(can_fwd and not self._last_after_count)
 
     def has_unsaved_changes(self):
         return self.model.has_changes()
 
     def close_connection(self):
+        self._cancel_count()
         if self.conn:
             try:
                 self.conn.close()

@@ -127,6 +127,13 @@ def split_statements(sql: str) -> list[str]:
     return [p.sql for p in parse_script(sql) if not p.is_delimiter_line]
 
 
+def estimated_rows(conn, database: str, table: str) -> int | None:
+    """The server's quick row estimate (exact for MyISAM, approximate for InnoDB)."""
+    rs = execute(conn, "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s",
+                 (database, table))
+    return rs.rows[0][0] if rs.rows and rs.rows[0][0] is not None else None
+
+
 def _read_result(cur, statement, start, max_rows) -> ResultSet:
     if cur.description:
         columns = [d[0] for d in cur.description]
