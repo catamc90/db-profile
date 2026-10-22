@@ -83,7 +83,8 @@ class TableTab(QWidget):
         self.a_filter = toolbar.addAction(icons.icon("filter"), "Filter && Sort")
         self.a_filter.setCheckable(True)
         self.a_filter.toggled.connect(self._toggle_filter)
-        toolbar.addAction(icons.icon("export"), "Export", lambda: self.view.export_csv())
+        toolbar.addAction(icons.icon("import"), "Import", self._import)
+        toolbar.addAction(icons.icon("export"), "Export", self._export)
 
         # Filter bar, hidden until "Filter & Sort" is toggled (like Navicat)
         self.filter_bar = QFrame()
@@ -181,6 +182,19 @@ class TableTab(QWidget):
         layout.addWidget(self.view)
         layout.addWidget(bottom)
         return page
+
+    def _export(self):
+        from .transfer_wizards import ExportWizard
+        ExportWizard(self.cfg, self.database, [(self.table, "VIEW" if self.is_view else "BASE TABLE")],
+                     [self.table], parent=self).exec()
+
+    def _import(self):
+        from .transfer_wizards import ImportWizard
+        if self.is_view:
+            QMessageBox.information(self, "Import", "Records can't be imported into a view.")
+            return
+        ImportWizard(self.cfg, self.database, [(self.table, "BASE TABLE")], self.table,
+                     on_finished=self.load_data_force, parent=self).exec()
 
     def _toggle_filter(self, on):
         self.filter_bar.setVisible(on)

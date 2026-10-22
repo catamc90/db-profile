@@ -5,7 +5,7 @@ Every icon is drawn on a 16x16 grid and scaled, so it stays sharp at any size.
 import math
 
 from PyQt6.QtCore import QPointF, QRect, QRectF, QSize, Qt
-from PyQt6.QtGui import QBrush, QColor, QIcon, QIconEngine, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
+from PyQt6.QtGui import QBrush, QColor, QFont, QIcon, QIconEngine, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 
 BLUE = QColor("#2d7ff9")
 GREEN = QColor("#2fa55a")
@@ -146,6 +146,81 @@ def drop_table(p):
     _badge(p, RED, "x")
 
 
+def _tile(p, color, text):
+    """Rounded square with a short white label, e.g. "fx"."""
+    _fill(p, color)
+    p.drawRoundedRect(QRectF(1.5, 1.5, 13, 13), 2.5, 2.5)
+    font = QFont("DejaVu Sans")
+    font.setPixelSize(8)
+    font.setBold(True)
+    font.setItalic(text == "fx")
+    p.setFont(font)
+    p.setPen(_pen(WHITE, 1))
+    p.drawText(QRectF(1.5, 1.5, 13, 12.5), Qt.AlignmentFlag.AlignCenter, text)
+
+
+def function(p):
+    _tile(p, ORANGE, "fx")
+
+
+def procedure(p):
+    _tile(p, QColor("#d9822b"), "P")
+
+
+def new_function(p):
+    function(p)
+    _badge(p, GREEN, "+")
+
+
+def design_function(p):
+    function(p)
+    _badge(p, BLUE, "pencil")
+
+
+def drop_function(p):
+    function(p)
+    _badge(p, RED, "x")
+
+
+def user(p, color=BLUE):
+    _fill(p, color)
+    p.drawEllipse(QPointF(8, 5), 3, 3)
+    path = QPainterPath()
+    path.moveTo(2.5, 14.5)
+    path.cubicTo(2.5, 9, 13.5, 9, 13.5, 14.5)
+    path.closeSubpath()
+    p.drawPath(path)
+
+
+def users(p):
+    user(p)
+
+
+def new_user(p):
+    user(p)
+    _badge(p, GREEN, "+")
+
+
+def edit_user(p):
+    user(p)
+    _badge(p, ORANGE, "pencil")
+
+
+def drop_user(p):
+    user(p)
+    _badge(p, RED, "x")
+
+
+def save(p):
+    _fill(p, BLUE)
+    p.drawRoundedRect(QRectF(2, 2, 12, 12), 1.6, 1.6)
+    _fill(p, WHITE)
+    p.drawRect(QRectF(4.5, 2, 7, 4.2))
+    p.drawRoundedRect(QRectF(4, 8.5, 8, 5.5), 0.8, 0.8)
+    _fill(p, BLUE)
+    p.drawRect(QRectF(9, 2.8, 1.5, 2.6))
+
+
 def refresh(p):
     p.setPen(_pen(BLUE, 1.6))
     p.setBrush(Qt.BrushStyle.NoBrush)
@@ -212,6 +287,15 @@ def export(p):
     p.setPen(_pen(BLUE, 1.4))
     p.drawLine(QPointF(8, 2.5), QPointF(8, 10))
     p.drawPolyline(_poly((5, 5.5), (8, 2.5), (11, 5.5)))
+
+
+def import_(p):
+    p.setPen(_pen(DARK, 1.3))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawPolyline(_poly((3, 8.5), (3, 13.5), (13, 13.5), (13, 8.5)))
+    p.setPen(_pen(GREEN, 1.4))
+    p.drawLine(QPointF(8, 2.5), QPointF(8, 10))
+    p.drawPolyline(_poly((5, 7), (8, 10), (11, 7)))
 
 
 def set_null(p):
@@ -303,6 +387,7 @@ _cache: dict[str, QIcon] = {}
 _VARIANTS = {
     "connection_closed": lambda p: connection(p, active=False),
     "database_closed": lambda p: database(p, open_=False),
+    "import": import_,
 }
 
 

@@ -1,4 +1,5 @@
 """Thin layer over PyMySQL: connecting, splitting and running SQL."""
+import re
 import time
 from dataclasses import dataclass
 
@@ -36,11 +37,27 @@ class ResultSet:
     truncated: bool = False
 
 
+DELIMITER_RE = re.compile(r"[ \t]*DELIMITER[ \t]+(\S+)[ \t]*(?:\r?\n|$)", re.IGNORECASE)
+
+
 def split_statements(sql: str) -> list[str]:
-    """Split a script on ';', ignoring semicolons in quotes and comments."""
+    """Split a script into statements.
+
+    Delimiters inside quotes and comments are ignored, and mysql-client style
+    ``DELIMITER $$`` lines are honoured so routines with BEGIN ... END bodies work.
+    """
     statements, buf = [], []
+    delimiter = ";"
     i, n = 0, len(sql)
     quote = None
+    line_start = True
+
+    def flush():
+        stmt = "".join(buf).strip()
+        if stmt:
+            statements.append(stmt)
+        buf.clear()
+
     while i < n:
         ch = sql[i]
         nxt = sql[i + 1] if i + 1 < n else ""
@@ -52,7 +69,17 @@ def split_statements(sql: str) -> list[str]:
                 continue
             if ch == quote:
                 quote = None
-        elif ch in ("'", '"', "`"):
+            i += 1
+            continue
+        if line_start:
+            m = DELIMITER_RE.match(sql, i)
+            if m:
+                flush()
+                delimiter = m.group(1)
+                i = m.end()
+                continue
+        line_start = ch == "\n"
+        if ch in ("'", '"', "`"):
             quote = ch
             buf.append(ch)
         elif ch == "#" or (ch == "-" and nxt == "-" and (i + 2 >= n or sql[i + 2] in " \t\r\n")):
@@ -67,18 +94,30 @@ def split_statements(sql: str) -> list[str]:
             buf.append(sql[i:end])
             i = end
             continue
-        elif ch == ";":
-            stmt = "".join(buf).strip()
-            if stmt:
-                statements.append(stmt)
-            buf = []
+        elif sql.startswith(delimiter, i):
+            flush()
+            i += len(delimiter)
+            continue
         else:
             buf.append(ch)
         i += 1
-    stmt = "".join(buf).strip()
-    if stmt:
-        statements.append(stmt)
+    flush()
     return statements
+
+
+def _read_result(cur, statement, start, max_rows) -> ResultSet:
+    if cur.description:
+        columns = [d[0] for d in cur.description]
+        rows = list(cur.fetchmany(max_rows))
+        truncated = cur.fetchone() is not None
+        # Drain any remaining rows so the connection stays usable.
+        while truncated and cur.fetchmany(10000):
+            pass
+        rowcount = len(rows)
+    else:
+        columns, rows, truncated = None, [], False
+        rowcount = cur.rowcount
+    return ResultSet(statement, columns, rows, rowcount, time.perf_counter() - start, truncated)
 
 
 def execute(conn, statement: str, args=None, max_rows: int = MAX_FETCH_ROWS) -> ResultSet:
@@ -86,18 +125,27 @@ def execute(conn, statement: str, args=None, max_rows: int = MAX_FETCH_ROWS) -> 
     start = time.perf_counter()
     with conn.cursor() as cur:
         cur.execute(statement, args)
-        if cur.description:
-            columns = [d[0] for d in cur.description]
-            rows = list(cur.fetchmany(max_rows))
-            truncated = cur.fetchone() is not None
-            # Drain any remaining rows so the connection stays usable.
-            while truncated and cur.fetchmany(10000):
-                pass
-            rowcount = len(rows)
-        else:
-            columns, rows, truncated = None, [], False
-            rowcount = cur.rowcount
-    return ResultSet(statement, columns, rows, rowcount, time.perf_counter() - start, truncated)
+        result = _read_result(cur, statement, start, max_rows)
+        while cur.nextset():  # discard extra result sets (e.g. from CALL)
+            pass
+    return result
+
+
+def execute_all(conn, statement: str, max_rows: int = MAX_FETCH_ROWS) -> list[ResultSet]:
+    """Execute one statement and return every result set it produces (CALL can return several)."""
+    conn.ping(reconnect=True)
+    start = time.perf_counter()
+    results = []
+    with conn.cursor() as cur:
+        cur.execute(statement)
+        while True:
+            results.append(_read_result(cur, statement, start, max_rows))
+            if not cur.nextset():
+                break
+            start = time.perf_counter()
+    # A CALL ends with an empty status result; only keep it when nothing returned rows.
+    with_rows = [r for r in results if r.columns is not None]
+    return with_rows or results[-1:]
 
 
 def run_script(conn, sql: str) -> list[ResultSet | Exception]:
@@ -105,7 +153,7 @@ def run_script(conn, sql: str) -> list[ResultSet | Exception]:
     results = []
     for stmt in split_statements(sql):
         try:
-            results.append(execute(conn, stmt))
+            results.extend(execute_all(conn, stmt))
         except Exception as e:  # noqa: BLE001 - surface any driver error to the UI
             e.statement = stmt
             results.append(e)
@@ -136,3 +184,61 @@ def primary_key(conn, database: str, table: str) -> list[str]:
         (database, table),
     )
     return [r[0] for r in rs.rows]
+
+
+# --- functions / procedures ---------------------------------------------------
+def list_routines(conn, database: str, details: bool = False):
+    """Return [(name, 'FUNCTION' | 'PROCEDURE'), ...], or full detail rows when details=True."""
+    cols = "ROUTINE_NAME, ROUTINE_TYPE"
+    if details:
+        cols += (", DTD_IDENTIFIER, IS_DETERMINISTIC, SECURITY_TYPE, DEFINER, CREATED, LAST_ALTERED, "
+                 "ROUTINE_COMMENT")
+    rs = execute(conn, f"SELECT {cols} FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA = %s "
+                       "AND ROUTINE_TYPE IN ('FUNCTION', 'PROCEDURE') ORDER BY ROUTINE_NAME", (database,))
+    return [tuple(r) for r in rs.rows]
+
+
+def routine_definition(conn, database: str, name: str, rtype: str) -> str:
+    rs = execute(conn, f"SHOW CREATE {rtype} {quote_ident(database)}.{quote_ident(name)}")
+    definition = rs.rows[0][2] if rs.rows else None
+    if definition is None:
+        raise PermissionError(f"Not allowed to see the definition of {rtype.lower()} {name}.")
+    return definition
+
+
+def routine_params(conn, database: str, name: str, rtype: str) -> list[tuple[str, str, str]]:
+    """Return [(mode, name, data type), ...]; mode is IN / OUT / INOUT (functions: IN)."""
+    rs = execute(
+        conn,
+        "SELECT PARAMETER_MODE, PARAMETER_NAME, DTD_IDENTIFIER FROM information_schema.PARAMETERS "
+        "WHERE SPECIFIC_SCHEMA = %s AND SPECIFIC_NAME = %s AND ROUTINE_TYPE = %s AND ORDINAL_POSITION > 0 "
+        "ORDER BY ORDINAL_POSITION",
+        (database, name, rtype),
+    )
+    return [(mode or "IN", pname, dtd) for mode, pname, dtd in rs.rows]
+
+
+# --- users ---------------------------------------------------------------------
+def list_users(conn) -> list[dict]:
+    """Rows of mysql.user as dicts (column set differs between MySQL and MariaDB versions)."""
+    rs = execute(conn, "SELECT * FROM mysql.user ORDER BY User, Host")
+    return [dict(zip(rs.columns, row)) for row in rs.rows]
+
+
+def grantee(user: str, host: str) -> str:
+    """The GRANTEE string used by information_schema privilege tables."""
+    return "'" + user.replace("'", "''") + "'@'" + host.replace("'", "''") + "'"
+
+
+def user_privileges(conn, user: str, host: str):
+    """Return (global privileges, grant option, {database: privileges})."""
+    g = grantee(user, host)
+    rows = execute(conn, "SELECT PRIVILEGE_TYPE, IS_GRANTABLE FROM information_schema.USER_PRIVILEGES "
+                         "WHERE GRANTEE = %s", (g,)).rows
+    global_privs = {p for p, _ in rows if p != "USAGE"}
+    grant_option = any(grantable == "YES" for _, grantable in rows)
+    per_db: dict[str, set[str]] = {}
+    for schema, priv in execute(conn, "SELECT TABLE_SCHEMA, PRIVILEGE_TYPE FROM information_schema.SCHEMA_PRIVILEGES "
+                                      "WHERE GRANTEE = %s", (g,)).rows:
+        per_db.setdefault(schema, set()).add(priv)
+    return global_privs, grant_option, per_db

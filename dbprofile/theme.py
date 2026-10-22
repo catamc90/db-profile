@@ -126,6 +126,17 @@ QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #b5b5b5; bor
 QCheckBox::indicator:hover { border-color: %(ACCENT)s; }
 QCheckBox::indicator:checked { background: %(ACCENT)s; border-color: %(ACCENT)s; image: url(%(ICONS)s/check.png); }
 
+QRadioButton { spacing: 6px; }
+QRadioButton::indicator { width: 14px; height: 14px; border: 1px solid #b5b5b5; border-radius: 8px; background: #ffffff; }
+QRadioButton::indicator:hover { border-color: %(ACCENT)s; }
+QRadioButton::indicator:checked { border: 5px solid %(ACCENT)s; width: 6px; height: 6px; }
+QRadioButton::indicator:disabled { background: #f0f0f0; border-color: #d0d0d0; }
+
+QProgressBar { background: #ffffff; border: 1px solid %(INPUT_BORDER)s; border-radius: 3px; text-align: center; min-height: 16px; }
+QProgressBar::chunk { background: %(ACCENT)s; border-radius: 2px; }
+
+QWizard QLabel#qt_wizard_title { font-weight: bold; }
+
 /* scroll bars */
 QScrollBar:vertical { background: transparent; width: 11px; margin: 0; }
 QScrollBar:horizontal { background: transparent; height: 11px; margin: 0; }

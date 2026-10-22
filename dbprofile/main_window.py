@@ -8,12 +8,18 @@ from PyQt6.QtWidgets import (
 from . import APP_NAME, APP_VERSION, db, icons
 from .config import load_connections, save_connections
 from .connection_dialog import ConnectionDialog
-from .objects_tab import ObjectsTab
+from .objects_tab import ROUTINE, ObjectsTab
 from .query_tab import QueryTab
+from .routine_tab import RoutineTab
 from .table_tab import TableTab
+from . import transfer_wizards
+from .users_tab import UsersTab
 
 ROLE = Qt.ItemDataRole.UserRole
-CONNECTION, DATABASE, TABLE, PLACEHOLDER = "connection", "database", "table", "placeholder"
+CONNECTION, DATABASE, GROUP, TABLE, ROUTINE_ITEM, PLACEHOLDER = (
+    "connection", "database", "group", "table", "routine", "placeholder")
+# Object groups shown under each database in the tree, like Navicat.
+GROUPS = [("Tables", "BASE TABLE"), ("Views", "VIEW"), ("Functions", ROUTINE)]
 SYSTEM_SCHEMAS = {"information_schema", "mysql", "performance_schema", "sys"}
 
 
@@ -33,6 +39,9 @@ class MainWindow(QMainWindow):
             "database_closed": icons.icon("database_closed"),
             "BASE TABLE": icons.icon("table"),
             "VIEW": icons.icon("view"),
+            "FUNCTION": icons.icon("function"),
+            "PROCEDURE": icons.icon("procedure"),
+            ROUTINE: icons.icon("function"),
         }
 
         self.tree = QTreeWidget()
@@ -53,6 +62,13 @@ class MainWindow(QMainWindow):
         self.objects.open_requested.connect(self._open_from_objects)
         self.objects.new_query_requested.connect(self._query_from_objects)
         self.objects.drop_requested.connect(self.drop_objects)
+        self.objects.open_routine_requested.connect(self._open_routines_from_objects)
+        self.objects.import_requested.connect(
+            lambda table: self.import_wizard(self.objects.cfg, self.objects.database, table or None))
+        self.objects.export_requested.connect(
+            lambda names: self.export_wizard(self.objects.cfg, self.objects.database, names))
+        self.objects.new_routine_requested.connect(
+            lambda: self.new_routine(self.objects.cfg, self.objects.database))
         self.tabs.addTab(self.objects, icons.icon("objects"), "Objects")
         # The Objects tab is permanent: no close button.
         self.tabs.tabBar().setTabButton(0, self.tabs.tabBar().ButtonPosition.RightSide, None)
@@ -98,6 +114,12 @@ class MainWindow(QMainWindow):
         show_views = QAction(icons.icon("view"), "View", self)
         show_views.setToolTip("List the views of the selected database")
         show_views.triggered.connect(lambda: self.show_objects("VIEW"))
+        show_functions = QAction(icons.icon("function"), "Function", self)
+        show_functions.setToolTip("List the functions and procedures of the selected database")
+        show_functions.triggered.connect(lambda: self.show_objects(ROUTINE))
+        users = QAction(icons.icon("user"), "User", self)
+        users.setToolTip("Manage the users of the selected connection")
+        users.triggered.connect(lambda: self.open_users())
         refresh = QAction(icons.icon("refresh"), "Refresh", self)
         refresh.setShortcut(QKeySequence("Ctrl+R"))
         refresh.triggered.connect(self.refresh_selected)
@@ -105,7 +127,7 @@ class MainWindow(QMainWindow):
         close_tab.setShortcut(QKeySequence("Ctrl+W"))
         close_tab.triggered.connect(lambda: self.close_tab(self.tabs.currentIndex()))
         self.addAction(close_tab)
-        for a in (new_conn, new_query, None, show_tables, show_views, None, refresh):
+        for a in (new_conn, new_query, None, show_tables, show_views, show_functions, None, users, None, refresh):
             if a is None:
                 tb.addSeparator()
             else:
@@ -120,6 +142,8 @@ class MainWindow(QMainWindow):
         view = self.menuBar().addMenu("&View")
         view.addAction(show_tables)
         view.addAction(show_views)
+        view.addAction(show_functions)
+        view.addAction(users)
         view.addSeparator()
         view.addAction(refresh)
         help_menu = self.menuBar().addMenu("&Help")
@@ -140,14 +164,42 @@ class MainWindow(QMainWindow):
                 else:
                     menu.addAction("Open Connection", lambda: item.setExpanded(True))
                 menu.addAction("New Query", lambda: self.new_query(item))
+                menu.addAction(icons.icon("user"), "Users", lambda: self.open_users(item))
+                menu.addAction("Execute SQL File…", lambda: self.run_sql_file(item))
                 menu.addSeparator()
                 menu.addAction("New Database…", lambda: self.create_database(item))
                 menu.addAction("Refresh", lambda: self.refresh(item))
                 menu.addSeparator()
                 menu.addAction("Edit Connection…", lambda: self.edit_connection(item))
                 menu.addAction("Delete Connection", lambda: self.delete_connection(item))
-            elif kind == DATABASE:
+            elif kind == GROUP:
+                info = item.data(0, ROLE)
+                if info["group"] == ROUTINE:
+                    menu.addAction(icons.icon("new_function"), "New Function…",
+                                   lambda: self.new_routine(self._cfg(item)[0], info["db"]))
                 menu.addAction("New Query", lambda: self.new_query(item))
+                menu.addAction("Refresh", lambda: self.refresh(item))
+            elif kind == ROUTINE_ITEM:
+                menu.addAction(icons.icon("design_function"), "Design Function", lambda: self.open_routine(item))
+                menu.addAction(icons.icon("run"), "Execute…", lambda: self.open_routine(item, execute=True))
+                menu.addAction(icons.icon("new_function"), "New Function…",
+                               lambda: self.new_routine(self._cfg(item)[0], item.data(0, ROLE)["db"]))
+                menu.addSeparator()
+                menu.addAction(icons.icon("drop_function"), "Delete Function…", lambda: self.drop_routine(item))
+            elif kind == DATABASE:
+                cfg, database = self._cfg(item)[0], item.data(0, ROLE)["db"]
+                menu.addAction("New Query", lambda: self.new_query(item))
+                menu.addSeparator()
+                menu.addAction(icons.icon("import"), "Import Wizard…", lambda: self.import_wizard(cfg, database))
+                menu.addAction(icons.icon("export"), "Export Wizard…", lambda: self.export_wizard(cfg, database))
+                menu.addSeparator()
+                menu.addAction("Execute SQL File…", lambda: self.run_sql_file(item))
+                dump = menu.addMenu("Dump SQL File")
+                dump.addAction("Structure and Data…",
+                               lambda: transfer_wizards.dump_sql_file(self, cfg, database, with_data=True))
+                dump.addAction("Structure Only…",
+                               lambda: transfer_wizards.dump_sql_file(self, cfg, database, with_data=False))
+                menu.addSeparator()
                 menu.addAction("Refresh", lambda: self.refresh(item))
                 menu.addSeparator()
                 menu.addAction("Drop Database…", lambda: self.drop_database(item))
@@ -156,6 +208,14 @@ class MainWindow(QMainWindow):
                 menu.addAction("Structure", lambda: self.open_table(item, page=1))
                 menu.addAction("Show DDL", lambda: self.open_table(item, page=2))
                 menu.addAction("New Query", lambda: self.new_query(item))
+                menu.addSeparator()
+                info = item.data(0, ROLE)
+                cfg = self._cfg(item)[0]
+                if info["type"] != "VIEW":
+                    menu.addAction(icons.icon("import"), "Import Wizard…",
+                                   lambda: self.import_wizard(cfg, info["db"], info["table"]))
+                menu.addAction(icons.icon("export"), "Export Wizard…",
+                               lambda: self.export_wizard(cfg, info["db"], [info["table"]]))
                 menu.addSeparator()
                 if item.data(0, ROLE)["type"] != "VIEW":
                     menu.addAction("Truncate Table…", lambda: self.truncate_table(item))
@@ -207,61 +267,82 @@ class MainWindow(QMainWindow):
         if item.childCount() != 1 or item.child(0).data(0, ROLE)["kind"] != PLACEHOLDER:
             return
         info = item.data(0, ROLE)
+        if info["kind"] == GROUP:
+            return  # groups are filled when their database is expanded
         self.setCursor(Qt.CursorShape.WaitCursor)
         try:
             conn = self._tree_conn(item)
             if info["kind"] == CONNECTION:
-                children = [(name, {"kind": DATABASE, "db": name}) for name in db.list_databases(conn)]
+                databases = db.list_databases(conn)
             else:
-                children = [
-                    (name, {"kind": TABLE, "db": info["db"], "table": name, "type": ttype})
-                    for name, ttype in db.list_tables(conn, info["db"])
-                ]
+                tables = db.list_tables(conn, info["db"])
+                routines = db.list_routines(conn, info["db"])
         except ConnectionAbortedError:
             item.setExpanded(False)
             return
         except Exception as e:  # noqa: BLE001
             item.setExpanded(False)
-            self._forget_conn(item)
+            if info["kind"] == CONNECTION:
+                self._forget_conn(item)
             QMessageBox.critical(self, "Error", str(e))
             return
         finally:
             self.unsetCursor()
 
         item.takeChildren()
-        for name, data in children:
-            child = QTreeWidgetItem([name])
-            child.setData(0, ROLE, data)
-            if data["kind"] == DATABASE:
+        if info["kind"] == CONNECTION:
+            for name in databases:
+                child = QTreeWidgetItem([name])
+                child.setData(0, ROLE, {"kind": DATABASE, "db": name})
                 child.setIcon(0, self.icons["database_closed"])
                 if name in SYSTEM_SCHEMAS:
                     child.setForeground(0, self.palette().placeholderText())
                 self._add_placeholder(child)
-            else:
-                child.setIcon(0, self.icons.get(data["type"], self.icons["BASE TABLE"]))
-            item.addChild(child)
-        if info["kind"] == CONNECTION:
+                item.addChild(child)
             item.setIcon(0, self.icons[CONNECTION])
-        else:
-            item.setIcon(0, self.icons[DATABASE])
-            self.statusBar().showMessage(f"{info['db']}: {len(children)} table(s)")
+            return
+
+        database = info["db"]
+        members = {
+            "BASE TABLE": [(n, {"kind": TABLE, "db": database, "table": n, "type": t})
+                           for n, t in tables if t != "VIEW"],
+            "VIEW": [(n, {"kind": TABLE, "db": database, "table": n, "type": t}) for n, t in tables if t == "VIEW"],
+            ROUTINE: [(n, {"kind": ROUTINE_ITEM, "db": database, "name": n, "type": t}) for n, t in routines],
+        }
+        for label, group in GROUPS:
+            node = QTreeWidgetItem([label])
+            node.setData(0, ROLE, {"kind": GROUP, "db": database, "group": group})
+            node.setIcon(0, self.icons[group])
+            for name, data in members[group]:
+                child = QTreeWidgetItem([name])
+                child.setData(0, ROLE, data)
+                child.setIcon(0, self.icons[data["type"]])
+                node.addChild(child)
+            item.addChild(node)
+        item.setIcon(0, self.icons[DATABASE])
+        self.statusBar().showMessage(
+            f"{database}: {len(members['BASE TABLE'])} table(s), {len(members['VIEW'])} view(s), "
+            f"{len(routines)} function(s)")
 
     def _tree_selection_changed(self, item, _previous):
         if item is None:
             return
         info = item.data(0, ROLE)
-        if info["kind"] not in (DATABASE, TABLE):
+        kind = info["kind"]
+        if kind not in (DATABASE, GROUP, TABLE, ROUTINE_ITEM):
             return
         cfg, _ = self._cfg(item)
         conn = self.open_conns.get(cfg.id)
         if conn is None:
             return
+        self.objects.kind = {DATABASE: None, GROUP: info.get("group"), TABLE: info.get("type"),
+                             ROUTINE_ITEM: ROUTINE}[kind]
         try:
-            self.objects.show_database(cfg, info["db"], conn, info.get("table"))
+            self.objects.show_database(cfg, info["db"], conn, info.get("table") or info.get("name"))
         except Exception as e:  # noqa: BLE001
             self._status(f"Error: {e}")
             return
-        if info["kind"] == DATABASE:
+        if kind in (DATABASE, GROUP):
             self.tabs.setCurrentWidget(self.objects)
 
     def show_objects(self, kind):
@@ -278,32 +359,166 @@ class MainWindow(QMainWindow):
                         return top.child(j)
         return None
 
-    def drop_objects(self, tables):
-        cfg, database = self.objects.cfg, self.objects.database
+    def drop_objects(self, objects, cfg=None, database=None):
+        """Drop tables, views, functions or procedures given as [(name, type), ...]."""
+        cfg, database = cfg or self.objects.cfg, database or self.objects.database
         item = self._db_item(cfg, database)
-        if item is None or not tables:
+        if item is None or not objects:
             return
-        if len(tables) == 1:
-            name, ttype = tables[0]
-            if not self._confirm_name("View" if ttype == "VIEW" else "Table", name):
+        labels = {"VIEW": "View", "FUNCTION": "Function", "PROCEDURE": "Procedure"}
+        if len(objects) == 1:
+            name, otype = objects[0]
+            if not self._confirm_name(labels.get(otype, "Table"), name):
                 return
         else:
-            names = ", ".join(n for n, _ in tables)
-            if QMessageBox.question(self, "Drop objects", f"Drop {len(tables)} objects? This cannot be undone.\n\n"
+            names = ", ".join(n for n, _ in objects)
+            if QMessageBox.question(self, "Drop objects", f"Drop {len(objects)} objects? This cannot be undone.\n\n"
                                     f"{names}") != QMessageBox.StandardButton.Yes:
                 return
-        for name, ttype in tables:
-            kind = "VIEW" if ttype == "VIEW" else "TABLE"
-            self._close_table_tabs(cfg, database, name)
-            if not self._run_ddl(item, f"DROP {kind} {db.quote_ident(database)}.{db.quote_ident(name)}", item):
+        for name, otype in objects:
+            keyword = {"VIEW": "VIEW", "FUNCTION": "FUNCTION", "PROCEDURE": "PROCEDURE"}.get(otype, "TABLE")
+            self._close_object_tabs(cfg, database, name)
+            if not self._run_ddl(item, f"DROP {keyword} {db.quote_ident(database)}.{db.quote_ident(name)}", item):
                 break
 
-    def _close_table_tabs(self, cfg, database, table):
+    def _close_object_tabs(self, cfg, database, name):
         for i in reversed(range(self.tabs.count())):
             w = self.tabs.widget(i)
-            if isinstance(w, TableTab) and (w.cfg.id, w.database, w.table) == (cfg.id, database, table):
-                w.model.reset_changes()
-                self.close_tab(i)
+            if not isinstance(w, (TableTab, RoutineTab)) or (w.cfg.id, w.database) != (cfg.id, database):
+                continue
+            if (w.table if isinstance(w, TableTab) else w.name) == name:
+                self.close_tab(i, force=True)
+
+    def _open_routines_from_objects(self, routines):
+        for name, rtype in routines:
+            self.open_routine_by_name(self.objects.cfg, self.objects.database, name, rtype)
+
+    def open_routine(self, item, execute=False):
+        cfg, _ = self._cfg(item)
+        info = item.data(0, ROLE)
+        tab = self.open_routine_by_name(cfg, info["db"], info["name"], info["type"])
+        if execute:
+            # The definition loads in the background; execute once it is ready.
+            if tab.conn is not None:
+                tab.execute()
+            else:
+                self._execute_when_ready(tab)
+
+    def _execute_when_ready(self, tab):
+        from PyQt6.QtCore import QTimer
+
+        def check():
+            if tab.conn is not None and not tab.busy:
+                tab.execute()
+            elif self.tabs.indexOf(tab) >= 0:
+                QTimer.singleShot(100, check)
+        QTimer.singleShot(100, check)
+
+    def open_routine_by_name(self, cfg, database, name, rtype):
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, RoutineTab) and (w.cfg.id, w.database, w.name) == (cfg.id, database, name):
+                self.tabs.setCurrentIndex(i)
+                return w
+        tab = RoutineTab(cfg, database, name, rtype, self._status, self._routine_saved)
+        idx = self.tabs.addTab(tab, self.icons[rtype], f"{name} @ {database}")
+        self.tabs.setTabToolTip(idx, f"{cfg.name} / {database} / {rtype.lower()} {name}")
+        self.tabs.setCurrentIndex(idx)
+        return tab
+
+    def new_routine(self, cfg, database):
+        if cfg is None or not database:
+            QMessageBox.information(self, APP_NAME, "Select a database first.")
+            return
+        kind, ok = QInputDialog.getItem(self, "New Function", "Type:", ["Function", "Procedure"], 0, False)
+        if not ok:
+            return
+        rtype = kind.upper()
+        tab = RoutineTab(cfg, database, None, rtype, self._status, self._routine_saved)
+        idx = self.tabs.addTab(tab, self.icons[rtype], f"New {kind} @ {database}")
+        self.tabs.setCurrentIndex(idx)
+
+    def _routine_saved(self, tab):
+        idx = self.tabs.indexOf(tab)
+        if idx >= 0:
+            self.tabs.setTabText(idx, f"{tab.name} @ {tab.database}")
+            self.tabs.setTabIcon(idx, self.icons[tab.rtype])
+        item = self._db_item(tab.cfg, tab.database)
+        if item is not None:
+            self.refresh(item)
+        if (self.objects.cfg, self.objects.database) == (tab.cfg, tab.database):
+            self.objects.reload()
+
+    def drop_routine(self, item):
+        cfg, _ = self._cfg(item)
+        info = item.data(0, ROLE)
+        self.drop_objects([(info["name"], info["type"])], cfg, info["db"])
+
+    def _objects_of(self, cfg, database):
+        item = self._db_item(cfg, database)
+        return db.list_tables(self._tree_conn(item), database) if item is not None else []
+
+    def _after_import(self, cfg, database):
+        item = self._db_item(cfg, database)
+        if item is not None:
+            self.refresh(item)
+        if (self.objects.cfg, self.objects.database) == (cfg, database):
+            self.objects.reload()
+
+    def import_wizard(self, cfg, database, table=None):
+        if cfg is None or not database:
+            QMessageBox.information(self, APP_NAME, "Select a database first.")
+            return
+        try:
+            tables = self._objects_of(cfg, database)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Import Wizard", str(e))
+            return
+        transfer_wizards.ImportWizard(cfg, database, tables, table,
+                                      on_finished=lambda: self._after_import(cfg, database), parent=self).exec()
+
+    def export_wizard(self, cfg, database, preselect=()):
+        if cfg is None or not database:
+            QMessageBox.information(self, APP_NAME, "Select a database first.")
+            return
+        try:
+            tables = self._objects_of(cfg, database)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Export Wizard", str(e))
+            return
+        transfer_wizards.ExportWizard(cfg, database, tables, preselect, parent=self).exec()
+
+    def run_sql_file(self, item):
+        cfg, top = self._cfg(item)
+        database = item.data(0, ROLE).get("db")
+
+        def done():
+            self.refresh(top if database is None else item)
+            if self.objects.database:
+                self.objects.reload()
+        transfer_wizards.execute_sql_file(self, cfg, database, on_finished=done)
+
+    def open_users(self, item=None):
+        item = item or self.tree.currentItem() or self.tree.topLevelItem(0)
+        if item is None:
+            QMessageBox.information(self, APP_NAME, "Create a connection first.")
+            return
+        cfg, _ = self._cfg(item)
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, UsersTab) and w.cfg.id == cfg.id:
+                self.tabs.setCurrentIndex(i)
+                return
+        try:
+            self._tree_conn(item)  # asks for an unsaved password
+            tab = UsersTab(cfg, self._status)
+        except ConnectionAbortedError:
+            return
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "Users", str(e))
+            return
+        idx = self.tabs.addTab(tab, icons.icon("user"), f"Users @ {cfg.name}")
+        self.tabs.setCurrentIndex(idx)
 
     def _open_from_objects(self, tables, page):
         for name, ttype in tables:
@@ -318,18 +533,26 @@ class MainWindow(QMainWindow):
         tab.editor.setFocus()
 
     def _double_clicked(self, item, _col):
-        if item.data(0, ROLE)["kind"] == TABLE:
+        kind = item.data(0, ROLE)["kind"]
+        if kind == TABLE:
             self.open_table(item)
+        elif kind == ROUTINE_ITEM:
+            self.open_routine(item)
 
     def refresh(self, item):
-        if item.data(0, ROLE)["kind"] == TABLE:
+        while item.data(0, ROLE)["kind"] not in (CONNECTION, DATABASE):
             item = item.parent()
         was_open = item.isExpanded()
+        # Remember which object groups were open so the refresh keeps them open.
+        open_groups = {item.child(i).text(0) for i in range(item.childCount()) if item.child(i).isExpanded()}
         item.setExpanded(False)
         item.takeChildren()
         self._add_placeholder(item)
         if was_open or item.data(0, ROLE)["kind"] == DATABASE:
             item.setExpanded(True)
+            for i in range(item.childCount()):
+                if item.child(i).text(0) in open_groups:
+                    item.child(i).setExpanded(True)
 
     def refresh_selected(self):
         widget = self.tabs.currentWidget()
@@ -463,14 +686,14 @@ class MainWindow(QMainWindow):
             return True
         return super().eventFilter(obj, event)
 
-    def close_tab(self, index):
+    def close_tab(self, index, force=False):
         """Close the tab at index; returns False if the user chose to keep it."""
         w = self.tabs.widget(index)
         if index < 0 or w is self.objects:
             return True
-        if isinstance(w, TableTab) and w.has_unsaved_changes():
+        if not force and getattr(w, "has_unsaved_changes", lambda: False)():
             if QMessageBox.question(self, "Unsaved changes",
-                                    "This table has unsaved changes. Close anyway?") != QMessageBox.StandardButton.Yes:
+                                    "This tab has unsaved changes. Close anyway?") != QMessageBox.StandardButton.Yes:
                 return False
         if hasattr(w, "close_connection"):
             w.close_connection()
@@ -531,9 +754,9 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
-            if isinstance(w, TableTab) and w.has_unsaved_changes():
+            if getattr(w, "has_unsaved_changes", lambda: False)():
                 if QMessageBox.question(self, "Unsaved changes",
-                                        "Some tables have unsaved changes. Quit anyway?") \
+                                        "Some tabs have unsaved changes. Quit anyway?") \
                         != QMessageBox.StandardButton.Yes:
                     event.ignore()
                     return

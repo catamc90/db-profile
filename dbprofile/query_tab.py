@@ -163,10 +163,14 @@ class QueryTab(QWidget):
 
     def _export_current(self):
         view = self.results.currentWidget()
-        if isinstance(view, ResultView):
-            view.export_csv()
-        else:
+        if not isinstance(view, ResultView):
             self.status("Select a result tab to export")
+            return
+        from .transfer_wizards import ExportWizard
+        model = view.model()
+        name = "query_result" if self.results.count() <= 2 else f"query_result_{self.results.currentIndex()}"
+        ExportWizard(self.cfg, self.db_combo.currentData(), result=(model.columns, model.rows, name),
+                     parent=self).exec()
 
     def _sync_db_combo(self, name):
         idx = self.db_combo.findData(name)
