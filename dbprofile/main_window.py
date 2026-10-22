@@ -1,15 +1,15 @@
 from PyQt6.QtCore import QSettings, QSize, Qt
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
-    QInputDialog, QLineEdit, QMainWindow, QMenu, QMessageBox, QSplitter, QTabWidget, QTreeWidget,
+    QCheckBox, QInputDialog, QLineEdit, QMainWindow, QMenu, QMessageBox, QSplitter, QTabWidget, QTreeWidget,
     QTreeWidgetItem,
 )
 
-from . import APP_NAME, APP_VERSION, db, icons
+from . import APP_NAME, APP_VERSION, db, icons, saved_queries
 from .config import load_connections, save_connections
 from .connection_dialog import ConnectionDialog
 from .connections_dialogs import ExportConnectionsDialog, ImportConnectionsDialog
-from .objects_tab import ROUTINE, ObjectsTab
+from .objects_tab import QUERY, ROUTINE, ObjectsTab
 from .query_tab import QueryTab
 from .routine_tab import RoutineTab
 from .table_tab import TableTab
@@ -17,10 +17,10 @@ from . import transfer_wizards
 from .users_tab import UsersTab
 
 ROLE = Qt.ItemDataRole.UserRole
-CONNECTION, DATABASE, GROUP, TABLE, ROUTINE_ITEM, PLACEHOLDER = (
-    "connection", "database", "group", "table", "routine", "placeholder")
+CONNECTION, DATABASE, GROUP, TABLE, ROUTINE_ITEM, QUERY_ITEM, PLACEHOLDER = (
+    "connection", "database", "group", "table", "routine", "query", "placeholder")
 # Object groups shown under each database in the tree, like Navicat.
-GROUPS = [("Tables", "BASE TABLE"), ("Views", "VIEW"), ("Functions", ROUTINE)]
+GROUPS = [("Tables", "BASE TABLE"), ("Views", "VIEW"), ("Functions", ROUTINE), ("Queries", QUERY)]
 SYSTEM_SCHEMAS = {"information_schema", "mysql", "performance_schema", "sys"}
 
 
@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
             "FUNCTION": icons.icon("function"),
             "PROCEDURE": icons.icon("procedure"),
             ROUTINE: icons.icon("function"),
+            QUERY: icons.icon("query"),
         }
 
         self.tree = QTreeWidget()
@@ -68,6 +69,10 @@ class MainWindow(QMainWindow):
             lambda table: self.import_wizard(self.objects.cfg, self.objects.database, table or None))
         self.objects.export_requested.connect(
             lambda names: self.export_wizard(self.objects.cfg, self.objects.database, names))
+        self.objects.open_query_requested.connect(
+            lambda names: [self.open_saved_query(self.objects.cfg, self.objects.database, n) for n in names])
+        self.objects.rename_query_requested.connect(
+            lambda name: self.rename_query(self.objects.cfg, self.objects.database, name))
         self.objects.new_routine_requested.connect(
             lambda: self.new_routine(self.objects.cfg, self.objects.database))
         self.tabs.addTab(self.objects, icons.icon("objects"), "Objects")
@@ -118,6 +123,9 @@ class MainWindow(QMainWindow):
         show_functions = QAction(icons.icon("function"), "Function", self)
         show_functions.setToolTip("List the functions and procedures of the selected database")
         show_functions.triggered.connect(lambda: self.show_objects(ROUTINE))
+        show_queries = QAction(icons.icon("query"), "Query", self)
+        show_queries.setToolTip("List the saved queries of the selected database")
+        show_queries.triggered.connect(lambda: self.show_objects(QUERY))
         users = QAction(icons.icon("user"), "User", self)
         users.setToolTip("Manage the users of the selected connection")
         users.triggered.connect(lambda: self.open_users())
@@ -128,7 +136,8 @@ class MainWindow(QMainWindow):
         close_tab.setShortcut(QKeySequence("Ctrl+W"))
         close_tab.triggered.connect(lambda: self.close_tab(self.tabs.currentIndex()))
         self.addAction(close_tab)
-        for a in (new_conn, new_query, None, show_tables, show_views, show_functions, None, users, None, refresh):
+        for a in (new_conn, new_query, None, show_tables, show_views, show_functions, show_queries, None, users,
+                  None, refresh):
             if a is None:
                 tb.addSeparator()
             else:
@@ -148,6 +157,7 @@ class MainWindow(QMainWindow):
         view.addAction(show_tables)
         view.addAction(show_views)
         view.addAction(show_functions)
+        view.addAction(show_queries)
         view.addAction(users)
         view.addSeparator()
         view.addAction(refresh)
@@ -187,8 +197,17 @@ class MainWindow(QMainWindow):
                 if info["group"] == ROUTINE:
                     menu.addAction(icons.icon("new_function"), "New Function…",
                                    lambda: self.new_routine(self._cfg(item)[0], info["db"]))
-                menu.addAction("New Query", lambda: self.new_query(item))
+                menu.addAction(icons.icon("new_query"), "New Query", lambda: self.new_query(item))
                 menu.addAction("Refresh", lambda: self.refresh(item))
+            elif kind == QUERY_ITEM:
+                cfg, info = self._cfg(item)[0], item.data(0, ROLE)
+                menu.addAction(icons.icon("query"), "Open Query",
+                               lambda: self.open_saved_query(cfg, info["db"], info["name"]))
+                menu.addAction(icons.icon("new_query"), "New Query", lambda: self.new_query(item))
+                menu.addAction("Rename…", lambda: self.rename_query(cfg, info["db"], info["name"]))
+                menu.addSeparator()
+                menu.addAction(icons.icon("drop_query"), "Delete Query…",
+                               lambda: self.delete_queries(cfg, info["db"], [info["name"]]))
             elif kind == ROUTINE_ITEM:
                 menu.addAction(icons.icon("design_function"), "Design Function", lambda: self.open_routine(item))
                 menu.addAction(icons.icon("run"), "Execute…", lambda: self.open_routine(item, execute=True))
@@ -323,6 +342,7 @@ class MainWindow(QMainWindow):
                            for n, t in tables if t != "VIEW"],
             "VIEW": [(n, {"kind": TABLE, "db": database, "table": n, "type": t}) for n, t in tables if t == "VIEW"],
             ROUTINE: [(n, {"kind": ROUTINE_ITEM, "db": database, "name": n, "type": t}) for n, t in routines],
+            QUERY: self._query_members(self._cfg(item)[0], database),
         }
         for label, group in GROUPS:
             node = QTreeWidgetItem([label])
@@ -337,21 +357,42 @@ class MainWindow(QMainWindow):
         item.setIcon(0, self.icons[DATABASE])
         self.statusBar().showMessage(
             f"{database}: {len(members['BASE TABLE'])} table(s), {len(members['VIEW'])} view(s), "
-            f"{len(routines)} function(s)")
+            f"{len(routines)} function(s), {len(members[QUERY])} saved query(ies)")
+
+    @staticmethod
+    def _query_members(cfg, database):
+        return [(q.name, {"kind": QUERY_ITEM, "db": database, "name": q.name, "type": QUERY})
+                for q in saved_queries.list_queries(cfg.id, database)]
+
+    def _reload_queries(self, cfg, database):
+        """Refill a database's Queries group in the tree and the Objects list after saved queries change."""
+        item = self._db_item(cfg, database)
+        if item is not None and self._is_loaded(item):
+            for i in range(item.childCount()):
+                node = item.child(i)
+                if node.data(0, ROLE).get("group") == QUERY:
+                    node.takeChildren()
+                    for name, data in self._query_members(cfg, database):
+                        child = QTreeWidgetItem([name])
+                        child.setData(0, ROLE, data)
+                        child.setIcon(0, self.icons[QUERY])
+                        node.addChild(child)
+        if (self.objects.cfg, self.objects.database) == (cfg, database) and self.objects.mode == "queries":
+            self.objects.reload()
 
     def _tree_selection_changed(self, item, _previous):
         if item is None:
             return
         info = item.data(0, ROLE)
         kind = info["kind"]
-        if kind not in (DATABASE, GROUP, TABLE, ROUTINE_ITEM):
+        if kind not in (DATABASE, GROUP, TABLE, ROUTINE_ITEM, QUERY_ITEM):
             return
         cfg, _ = self._cfg(item)
         conn = self.open_conns.get(cfg.id)
         if conn is None:
             return
         self.objects.kind = {DATABASE: None, GROUP: info.get("group"), TABLE: info.get("type"),
-                             ROUTINE_ITEM: ROUTINE}[kind]
+                             ROUTINE_ITEM: ROUTINE, QUERY_ITEM: QUERY}[kind]
         try:
             self.objects.show_database(cfg, info["db"], conn, info.get("table") or info.get("name"))
         except Exception as e:  # noqa: BLE001
@@ -377,6 +418,10 @@ class MainWindow(QMainWindow):
     def drop_objects(self, objects, cfg=None, database=None):
         """Drop tables, views, functions or procedures given as [(name, type), ...]."""
         cfg, database = cfg or self.objects.cfg, database or self.objects.database
+        queries = [name for name, otype in objects if otype == QUERY]
+        if queries:
+            self.delete_queries(cfg, database, queries)
+            return
         item = self._db_item(cfg, database)
         if item is None or not objects:
             return
@@ -540,12 +585,7 @@ class MainWindow(QMainWindow):
             self.open_table_by_name(self.objects.cfg, self.objects.database, name, ttype, page)
 
     def _query_from_objects(self):
-        cfg = self.objects.cfg
-        self.query_counter += 1
-        tab = QueryTab(cfg, self.objects.database, self._status)
-        self.tabs.setCurrentIndex(self.tabs.addTab(tab, icons.icon("query"),
-                                                   f"Query {self.query_counter} — {self.objects.database}"))
-        tab.editor.setFocus()
+        self._add_query_tab(self.objects.cfg, self.objects.database)
 
     def _double_clicked(self, item, _col):
         kind = item.data(0, ROLE)["kind"]
@@ -553,6 +593,9 @@ class MainWindow(QMainWindow):
             self.open_table(item)
         elif kind == ROUTINE_ITEM:
             self.open_routine(item)
+        elif kind == QUERY_ITEM:
+            info = item.data(0, ROLE)
+            self.open_saved_query(self._cfg(item)[0], info["db"], info["name"])
 
     def refresh(self, item):
         while item.data(0, ROLE)["kind"] not in (CONNECTION, DATABASE):
@@ -684,16 +727,31 @@ class MainWindow(QMainWindow):
         if dlg.exec():
             self._status(f"Connections exported to {dlg.saved_path}")
 
+    def _confirm_delete_connection(self, cfg, query_count):
+        """Ask before deleting a connection. Returns (delete it, also delete its saved queries)."""
+        box = QMessageBox(QMessageBox.Icon.Question, "Delete connection",
+                          f"Delete the saved connection “{cfg.name}”?",
+                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, self)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        also = None
+        if query_count:
+            also = QCheckBox(f"Also delete its {query_count} saved quer{'y' if query_count == 1 else 'ies'}")
+            box.setCheckBox(also)  # unchecked: saved queries are kept unless the user asks
+        ok = box.exec() == QMessageBox.StandardButton.Yes
+        return ok, ok and also is not None and also.isChecked()
+
     def delete_connection(self, item):
         cfg, top = self._cfg(item)
-        if QMessageBox.question(self, "Delete connection",
-                                f"Delete the saved connection “{cfg.name}”?") != QMessageBox.StandardButton.Yes:
+        ok, delete_queries = self._confirm_delete_connection(cfg, saved_queries.count_for_connection(cfg.id))
+        if not ok:
             return
         if self.objects.cfg is cfg:
             self.objects.clear()
         self._forget_conn(top)
         self.connections.remove(cfg)
         save_connections(self.connections)
+        if delete_queries:
+            saved_queries.delete_connection(cfg.id)
         self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(top))
 
     # tabs ---------------------------------------------------------------
@@ -715,12 +773,108 @@ class MainWindow(QMainWindow):
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "Error", str(e))
             return
-        database = item.data(0, ROLE).get("db")
-        self.query_counter += 1
-        tab = QueryTab(cfg, database, self._status)
-        title = f"Query {self.query_counter}" + (f" — {database}" if database else "")
-        self.tabs.setCurrentIndex(self.tabs.addTab(tab, icons.icon("query"), title))
+        self._add_query_tab(cfg, item.data(0, ROLE).get("db"))
+
+    def _add_query_tab(self, cfg, database, query_name=None):
+        tab = QueryTab(cfg, database, self._status, query_name)
+        if query_name is None:
+            self.query_counter += 1
+            tab.base_title = f"Query {self.query_counter}" + (f" — {database}" if database else "")
+        else:
+            tab.base_title = f"{query_name} @ {database}"
+        tab.saved.connect(self._query_saved)
+        tab.modified_changed.connect(lambda _: self._update_query_title(tab))
+        idx = self.tabs.addTab(tab, icons.icon("query"), "")
+        self._update_query_title(tab)
+        self.tabs.setCurrentIndex(idx)
         tab.editor.setFocus()
+        return tab
+
+    def _update_query_title(self, tab):
+        idx = self.tabs.indexOf(tab)
+        if idx < 0:
+            return
+        if tab.query_name:
+            title = f"{tab.query_name} @ {tab.query_db}"
+            self.tabs.setTabToolTip(idx, f"{tab.cfg.name} / {tab.query_db} / query {tab.query_name}")
+        else:
+            title = tab.base_title
+        self.tabs.setTabText(idx, title + (" *" if tab.is_modified() else ""))
+
+    def _query_tab(self, cfg, database, name):
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if isinstance(w, QueryTab) and (w.cfg.id, w.query_db, w.query_name) == (cfg.id, database, name):
+                return w
+        return None
+
+    def open_saved_query(self, cfg, database, name):
+        tab = self._query_tab(cfg, database, name)
+        if tab is not None:
+            self.tabs.setCurrentWidget(tab)
+            return tab
+        try:
+            return self._add_query_tab(cfg, database, name)
+        except OSError as e:
+            QMessageBox.critical(self, "Open Query", f"Could not open the query “{name}”:\n{e}")
+            self._reload_queries(cfg, database)
+            return None
+
+    def _query_saved(self, tab, previous_db, previous_name):
+        self._update_query_title(tab)
+        self._reload_queries(tab.cfg, tab.query_db)
+        if previous_db and previous_db != tab.query_db:
+            self._reload_queries(tab.cfg, previous_db)
+        # Another tab showing a query that was just overwritten would save stale text over it later.
+        other = next((w for i in range(self.tabs.count()) if isinstance(w := self.tabs.widget(i), QueryTab)
+                      and w is not tab and (w.cfg.id, w.query_db, w.query_name)
+                      == (tab.cfg.id, tab.query_db, tab.query_name)), None)
+        if other is not None:
+            other.query_name = other.query_db = None
+            other.base_title = f"{tab.query_name} (replaced) — {tab.query_db}"
+            other.editor.document().setModified(True)
+            self._update_query_title(other)
+
+    def rename_query(self, cfg, database, name):
+        new, ok = QInputDialog.getText(self, "Rename Query", "New name:", text=name)
+        new = new.strip()
+        if not ok or new == name:
+            return
+        error = saved_queries.validate_name(new)
+        if error:
+            QMessageBox.warning(self, "Rename Query", error)
+            return
+        try:
+            saved_queries.rename(cfg.id, database, name, new)
+        except OSError as e:
+            QMessageBox.critical(self, "Rename Query", str(e))
+            return
+        tab = self._query_tab(cfg, database, name)
+        if tab is not None:
+            tab.query_name = new
+            self._update_query_title(tab)
+        self._reload_queries(cfg, database)
+        self._status(f"Renamed query {name} to {new}")
+
+    def delete_queries(self, cfg, database, names):
+        text = f"Delete the query “{names[0]}”?" if len(names) == 1 else \
+            f"Delete {len(names)} queries?\n\n" + ", ".join(names)
+        if QMessageBox.question(self, "Delete Query", text + " This cannot be undone.") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        for name in names:
+            tab = self._query_tab(cfg, database, name)
+            if tab is not None:
+                self.close_tab(self.tabs.indexOf(tab), force=True)
+            try:
+                saved_queries.delete(cfg.id, database, name)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                QMessageBox.critical(self, "Delete Query", str(e))
+                break
+        self._reload_queries(cfg, database)
+        self._status(f"Deleted {len(names)} quer{'y' if len(names) == 1 else 'ies'}")
 
     def open_table(self, item, page=0):
         cfg, _ = self._cfg(item)
@@ -773,7 +927,10 @@ class MainWindow(QMainWindow):
         w = self.tabs.widget(index)
         if index < 0 or w is self.objects:
             return True
-        if not force and getattr(w, "has_unsaved_changes", lambda: False)():
+        if not force and hasattr(w, "confirm_close"):
+            if not w.confirm_close():
+                return False
+        elif not force and getattr(w, "has_unsaved_changes", lambda: False)():
             if QMessageBox.question(self, "Unsaved changes",
                                     "This tab has unsaved changes. Close anyway?") != QMessageBox.StandardButton.Yes:
                 return False
@@ -834,6 +991,13 @@ class MainWindow(QMainWindow):
                           item)
 
     def closeEvent(self, event):
+        for i in range(self.tabs.count()):
+            w = self.tabs.widget(i)
+            if hasattr(w, "confirm_close") and w.is_modified():
+                self.tabs.setCurrentIndex(i)
+                if not w.confirm_close():
+                    event.ignore()
+                    return
         for i in range(self.tabs.count()):
             w = self.tabs.widget(i)
             if getattr(w, "has_unsaved_changes", lambda: False)():

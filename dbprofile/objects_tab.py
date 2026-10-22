@@ -1,16 +1,18 @@
-"""Navicat-style object list for the selected database: tables/views or functions/procedures."""
+"""Navicat-style object list for the selected database: tables/views, functions/procedures or saved queries."""
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QLabel, QLineEdit, QMenu, QSizePolicy, QStackedWidget, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import APP_NAME, db, icons
+from . import APP_NAME, db, icons, saved_queries
 
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 TYPE_ROLE = Qt.ItemDataRole.UserRole
 ROUTINE = "ROUTINE"  # kind used for functions + procedures
+QUERY = "QUERY"  # kind used for saved queries
 TABLE_COLUMNS = ["Name", "Type", "Rows", "Engine", "Data Size", "Index Size", "Updated", "Collation", "Comment"]
+QUERY_COLUMNS = ["Name", "Modified", "Size"]
 ROUTINE_COLUMNS = ["Name", "Type", "Returns", "Deterministic", "Security", "Definer", "Created", "Modified", "Comment"]
 
 
@@ -42,6 +44,8 @@ class ObjectsTab(QWidget):
     open_routine_requested = pyqtSignal(list)
     new_routine_requested = pyqtSignal()
     new_query_requested = pyqtSignal()
+    open_query_requested = pyqtSignal(list)  # saved query names
+    rename_query_requested = pyqtSignal(str)
     drop_requested = pyqtSignal(list)
     import_requested = pyqtSignal(str)  # preselected table ("" = none)
     export_requested = pyqtSignal(list)  # preselected table names
@@ -52,7 +56,7 @@ class ObjectsTab(QWidget):
         self.cfg = None
         self.database = None
         self.conn = None
-        self.kind = None  # None = tables + views, "BASE TABLE", "VIEW" or ROUTINE
+        self.kind = None  # None = tables + views, "BASE TABLE", "VIEW", ROUTINE or QUERY
         self.loaded_mode = None
 
         welcome = QLabel(
@@ -120,7 +124,7 @@ class ObjectsTab(QWidget):
 
     @property
     def mode(self):
-        return "routines" if self.kind == ROUTINE else "tables"
+        return {ROUTINE: "routines", QUERY: "queries"}.get(self.kind, "tables")
 
     def show_database(self, cfg, database, conn, select_name=None):
         if (self.cfg, self.database) != (cfg, database) or self.loaded_mode != self.mode:
@@ -159,6 +163,8 @@ class ObjectsTab(QWidget):
         self.list.clear()
         if self.mode == "routines":
             self._load_routines()
+        elif self.mode == "queries":
+            self._load_queries()
         else:
             self._load_tables()
         self.loaded_mode = self.mode
@@ -206,6 +212,17 @@ class ObjectsTab(QWidget):
             it.setData(0, TYPE_ROLE, rtype)
             self.list.addTopLevelItem(it)
 
+    def _load_queries(self):
+        self.list.setColumnCount(len(QUERY_COLUMNS))
+        self.list.setHeaderLabels(QUERY_COLUMNS)
+        for q in saved_queries.list_queries(self.cfg.id, self.database):
+            it = _Item([q.name, q.modified.strftime("%Y-%m-%d %H:%M:%S"), human_size(q.size)])
+            it.setIcon(0, self.icons[QUERY])
+            it.setData(0, TYPE_ROLE, QUERY)
+            it.setData(2, SORT_ROLE, q.size)
+            it.setTextAlignment(2, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.list.addTopLevelItem(it)
+
     # filtering / selection ----------------------------------------------------
     def _apply_filter(self, text=None):
         text = (self.filter.text() if text is None else text).strip().lower()
@@ -216,18 +233,22 @@ class ObjectsTab(QWidget):
             hide = (bool(text) and text not in it.text(0).lower()) or wrong_kind
             it.setHidden(hide)
             shown += not hide
-        what = {None: "object", "BASE TABLE": "table", "VIEW": "view", ROUTINE: "function"}[self.kind]
+        what = {None: "object", "BASE TABLE": "table", "VIEW": "view", ROUTINE: "function", QUERY: "query"}[self.kind]
+        plural = "queries" if what == "query" else what + "s"
         if self.database:
-            self.title.setText(f"{self.database} — {shown} {what}{'' if shown == 1 else 's'}")
+            self.title.setText(f"{self.database} — {shown} {what if shown == 1 else plural}")
 
     def _selected(self):
         return [(it.text(0), it.data(0, TYPE_ROLE)) for it in self.list.selectedItems() if not it.isHidden()]
 
     def _open_selected(self, *_):
+        selected = self._selected()
         if self.mode == "routines":
-            selected = self._selected()
             if selected:
                 self.open_routine_requested.emit(selected)
+        elif self.mode == "queries":
+            if selected:
+                self.open_query_requested.emit([n for n, _ in selected])
         else:
             self._emit_open(0)
 
@@ -241,15 +262,16 @@ class ObjectsTab(QWidget):
             self.open_requested.emit(selected, page)
 
     def _update_toolbar(self):
-        routines = self.mode == "routines"
-        self.a_open.setText("Design Function" if routines else "Open Table")
-        self.a_open.setIcon(icons.icon("design_function" if routines else "open_table"))
-        self.a_design.setVisible(not routines)
-        self.a_new_routine.setVisible(routines)
-        self.a_import.setVisible(not routines)
-        self.a_export.setVisible(not routines)
-        self.a_drop.setText("Delete Function" if routines else "Delete Table")
-        self.a_drop.setIcon(icons.icon("drop_function" if routines else "drop_table"))
+        mode = self.mode
+        tables = mode == "tables"
+        self.a_open.setText({"routines": "Design Function", "queries": "Open Query"}.get(mode, "Open Table"))
+        self.a_open.setIcon(icons.icon({"routines": "design_function", "queries": "query"}.get(mode, "open_table")))
+        self.a_design.setVisible(tables)
+        self.a_new_routine.setVisible(mode == "routines")
+        self.a_import.setVisible(tables)
+        self.a_export.setVisible(tables)
+        self.a_drop.setText({"routines": "Delete Function", "queries": "Delete Query"}.get(mode, "Delete Table"))
+        self.a_drop.setIcon(icons.icon({"routines": "drop_function", "queries": "drop_query"}.get(mode, "drop_table")))
 
     def _update_actions(self):
         has = bool(self.list.selectedItems())
@@ -259,7 +281,18 @@ class ObjectsTab(QWidget):
     def _menu(self, pos):
         menu = QMenu(self)
         n = len(self._selected()) if self.list.itemAt(pos) else 0
-        if self.mode == "routines":
+        if self.mode == "queries":
+            if n:
+                menu.addAction(icons.icon("query"), "Open Query" if n == 1 else f"Open {n} Queries",
+                               self._open_selected)
+            menu.addAction(icons.icon("new_query"), "New Query", self.new_query_requested.emit)
+            if n == 1:
+                menu.addAction("Rename…", lambda: self.rename_query_requested.emit(self._selected()[0][0]))
+            if n:
+                menu.addSeparator()
+                menu.addAction(icons.icon("drop_query"), "Delete Query" if n == 1 else f"Delete {n} Queries",
+                               lambda: self.drop_requested.emit(self._selected()))
+        elif self.mode == "routines":
             if n:
                 menu.addAction(icons.icon("design_function"), "Design Function", self._open_selected)
             menu.addAction(icons.icon("new_function"), "New Function…", self.new_routine_requested.emit)

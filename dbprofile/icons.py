@@ -127,6 +127,11 @@ def new_query(p):
     _badge(p, GREEN, "+")
 
 
+def drop_query(p):
+    query(p)
+    _badge(p, RED, "x")
+
+
 def open_table(p):
     table(p)
 

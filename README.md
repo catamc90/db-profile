@@ -17,17 +17,21 @@ A simple Navicat-style MySQL / MariaDB client for Linux, written in Python with 
   - Tunnels (SSH, HTTP) and SSL settings are not imported; the import list flags each affected connection.
   - Existing connections can be skipped, renamed or replaced.
   - Exports to `.ncx`, which Navicat can import, or to DB Profile `.json`. Export files are saved with mode 600.
-- **Object tree**: connection → databases → **Tables / Views / Functions** groups, like Navicat, loaded when you expand a node. Right-click to create or drop a database, or to truncate or drop a table.
+- **Object tree**: connection → databases → **Tables / Views / Functions / Queries** groups, like Navicat, loaded when you expand a node. Right-click to create or drop a database, or to truncate or drop a table.
 - **Objects tab**: a permanent first tab. Selecting a database in the tree lists its tables and views here, with row count, engine, size, last update, collation and comment. You can sort, filter by name, and select several tables to open them all into tabs at once (double-click, Enter, or right-click).
 - **Tabs**: each table opens once; opening it again switches to its existing tab. Middle-click a tab to close it. Right-click the tab bar for Close, Close Others, Close Tabs to the Right and Close All. Tabs with unsaved edits ask before closing.
 - **Functions**: the Function toolbar button or the Functions group lists functions and stored procedures, with return type, determinism, security, definer and dates.
   - The designer tab edits the `CREATE` statement. **Save** (Ctrl+S) replaces the routine, and if the new version fails, the previous one is put back.
   - **Execute** (F5) asks for the parameter values and runs `SELECT fn(...)` or `CALL proc(...)`. Each result set gets its own tab, and OUT/INOUT values are shown afterwards.
   - **New Function** starts from a function or procedure template.
+- **Saved queries**: each database has a **Queries** group, and the Query toolbar button lists them in the Objects tab with their modified date and size.
+  - In a query tab, **Save** (Ctrl+S) stores the SQL under a name in the database chosen in the toolbar; **Save As…** (Ctrl+Shift+S) saves a copy, also into another database. Unsaved edits show a `*` in the tab title, and closing asks to save them.
+  - Double-click a query to open it (it opens once, like tables). Right-click to rename or delete; several can be deleted at once from the Objects tab.
+  - Queries are plain `.sql` files in `~/.config/dbprofile/queries/<connection>/<database>/`. Deleting a connection keeps its saved queries, unless you tick “Also delete its saved queries” in the confirmation.
 - **Users**: the User toolbar button, or right-click a connection → Users.
   - The list shows each account's host, authentication plugin, and locked/expired status.
   - The user editor has **General** (name, host, password, account lock), **Server Privileges** (`ON *.*`, plus Grant Option), **Privileges** and **SQL Preview** tabs. Privileges are grouped (Data, Structure, Routines & Events, Other, Administration), each group with a select-all box. Quick-set buttons (Read Only, Read/Write, All, None) and search are available, and changes are shown in blue until saved. The Privileges tab lists the databases on the left with a summary of the access to each, and edits the selected one on the right. Only the differences are applied, as `CREATE/RENAME/ALTER USER`, `GRANT` and `REVOKE`.
-: SQL highlighting and line numbers. Run with **Ctrl+Enter** or **F5**; with text selected, only the selection runs. A script with several statements gets one result tab per SELECT. `DELIMITER $$` lines work as in the mysql client, so you can create routines with `BEGIN … END` bodies, and `CALL` shows every result set. Stop cancels the running query with `KILL QUERY`. Results are capped at 10,000 rows.
+- **Query editor**: SQL highlighting and line numbers. Run with **Ctrl+Enter** or **F5**; with text selected, only the selection runs. A script with several statements gets one result tab per SELECT. `DELIMITER $$` lines work as in the mysql client, so you can create routines with `BEGIN … END` bodies, and `CALL` shows every result set. Stop cancels the running query with `KILL QUERY`. Results are capped at 10,000 rows.
 - **Table viewer**: paged data with WHERE and ORDER BY filters. Edit cells, add rows, delete rows and set NULL, then save everything in one transaction or discard it. Also shows the Structure and DDL tabs. Editing needs a primary key; views are read-only.
 - **Export Wizard** (Objects toolbar, right-click a database or table, the table tab's Export button, or Export Result in a query tab):
   - Pick a format: CSV, TXT, JSON, XML, HTML, Excel (.xlsx) or SQL INSERT script.

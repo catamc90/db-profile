@@ -1,25 +1,32 @@
-"""SQL editor tab: write a script, run it, see each statement's results."""
+"""SQL editor tab: write a script, run it, see each statement's results, save it as a named query."""
 import html
 
-from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QKeySequence
 from PyQt6.QtWidgets import (
-    QComboBox, QLabel, QSplitter, QTabWidget, QTextEdit, QToolBar, QVBoxLayout, QWidget,
+    QComboBox, QInputDialog, QLabel, QMessageBox, QSplitter, QTabWidget, QTextEdit, QToolBar, QVBoxLayout, QWidget,
 )
 
-from . import db, icons
+from . import db, icons, saved_queries
 from .config import ConnectionConfig
 from .result_view import ResultModel, ResultView
 from .worker import run_async
 
 
 class QueryTab(QWidget):
-    def __init__(self, cfg: ConnectionConfig, database: str | None, status_callback, parent=None):
+    saved = pyqtSignal(object, str, str)  # (tab, previous database or "", previous name or "")
+    modified_changed = pyqtSignal(bool)
+
+    def __init__(self, cfg: ConnectionConfig, database: str | None, status_callback, query_name=None, parent=None):
         super().__init__(parent)
         self.cfg = cfg
         self.conn = None
         self.busy = False
         self.status = status_callback
+        self.initial_database = database
+        # A saved query belongs to one database; query_name is None until the query is saved.
+        self.query_db = database if query_name else None
+        self.query_name = query_name
 
         toolbar = QToolBar()
         toolbar.setIconSize(QSize(16, 16))
@@ -35,6 +42,20 @@ class QueryTab(QWidget):
         self.db_combo.setMinimumWidth(180)
         self.db_combo.activated.connect(self._use_database)
         toolbar.addWidget(self.db_combo)
+        toolbar.addSeparator()
+        self.save_action = QAction(icons.icon("save"), "Save", self)
+        self.save_action.setToolTip("Save this query (Ctrl+S)")
+        self.save_action.setShortcut(QKeySequence("Ctrl+S"))
+        self.save_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.save_action.triggered.connect(lambda: self.save())
+        self.addAction(self.save_action)
+        toolbar.addAction(self.save_action)
+        self.save_as_action = QAction("Save As…", self)
+        self.save_as_action.setShortcut(QKeySequence("Ctrl+Shift+S"))
+        self.save_as_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.save_as_action.triggered.connect(lambda: self.save(save_as=True))
+        self.addAction(self.save_as_action)
+        toolbar.addAction(self.save_as_action)
         toolbar.addSeparator()
         self.run_action = QAction(icons.icon("run"), "Run", self)
         self.run_action.setToolTip("Run all, or only the selected text (Ctrl+Enter / F5)")
@@ -52,6 +73,10 @@ class QueryTab(QWidget):
 
         from .sql_editor import SqlEditor  # local import keeps module load light
         self.editor = SqlEditor()
+        if query_name:
+            self.editor.setPlainText(saved_queries.load(cfg.id, database, query_name))
+            self.editor.document().setModified(False)
+        self.editor.document().modificationChanged.connect(self.modified_changed.emit)
         self.results = QTabWidget()
         self.results.setObjectName("subTabs")
         self.results.setDocumentMode(True)
@@ -186,6 +211,67 @@ class QueryTab(QWidget):
     def _log(self, text, color=None):
         style = f' style="color:{color}"' if color else ""
         self.messages.append(f"<div{style}>{text}</div><br>")
+
+    # saving -------------------------------------------------------------
+    def is_modified(self):
+        doc = self.editor.document()
+        return doc.isModified() and (self.query_name is not None or bool(self.editor.toPlainText().strip()))
+
+    def _target_database(self, save_as):
+        if self.query_db and not save_as:
+            return self.query_db
+        return self.db_combo.currentData() or (self.initial_database if self.conn is None else None) \
+            or self.query_db
+
+    def save(self, save_as=False):
+        """Save the editor text as a named query of its database. Returns True when saved."""
+        database = self._target_database(save_as)
+        if not database:
+            QMessageBox.information(self, "Save Query",
+                                    "Choose a database in the toolbar first: saved queries belong to a database.")
+            return False
+        name = self.query_name
+        if save_as or not name:
+            while True:
+                name, ok = QInputDialog.getText(self, "Save Query" if not save_as else "Save Query As",
+                                                f"Query name (in {database}):", text=name or "Untitled")
+                if not ok:
+                    return False
+                name = name.strip()
+                error = saved_queries.validate_name(name)
+                if error:
+                    QMessageBox.warning(self, "Save Query", error)
+                    continue
+                if (database, name) != (self.query_db, self.query_name) \
+                        and saved_queries.exists(self.cfg.id, database, name):
+                    if QMessageBox.question(self, "Save Query", f"A query named “{name}” already exists in "
+                                            f"{database}. Replace it?") != QMessageBox.StandardButton.Yes:
+                        continue
+                break
+        try:
+            saved_queries.save(self.cfg.id, database, name, self.editor.toPlainText())
+        except OSError as e:
+            QMessageBox.critical(self, "Save Query", f"Could not save the query:\n{e}")
+            return False
+        previous = (self.query_db or "", self.query_name or "")
+        self.query_db, self.query_name = database, name
+        self.editor.document().setModified(False)
+        self.status(f"Saved query {name} in {database}")
+        self.saved.emit(self, *previous)
+        return True
+
+    def confirm_close(self):
+        """Ask to save unsaved edits before the tab closes. Returns False to keep the tab open."""
+        if not self.is_modified():
+            return True
+        what = f"the query “{self.query_name}”" if self.query_name else "this new query"
+        answer = QMessageBox.question(
+            self, "Save Query", f"Do you want to save the changes to {what}?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save)
+        if answer == QMessageBox.StandardButton.Save:
+            return self.save()
+        return answer == QMessageBox.StandardButton.Discard
 
     def close_connection(self):
         if self.conn:
