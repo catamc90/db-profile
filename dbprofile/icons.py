@@ -359,6 +359,41 @@ def dash(p, color=WHITE):
     p.drawLine(QPointF(4.5, 8), QPointF(11.5, 8))
 
 
+# --- application icon --------------------------------------------------------
+def app(p):
+    """DB Profile's own icon: a white database on a blue tile, with an orange profile badge."""
+    _fill(p, BLUE)
+    p.drawRoundedRect(QRectF(0.5, 0.5, 15, 15), 3.4, 3.4)
+    # database cylinder: body, three disk lines and the top ellipse
+    _fill(p, WHITE)
+    body = QPainterPath()
+    body.moveTo(3.2, 4.4)
+    body.lineTo(3.2, 11.4)
+    body.arcTo(QRectF(3.2, 9.8, 8.6, 3.2), 180, 180)
+    body.lineTo(11.8, 4.4)
+    body.closeSubpath()
+    p.drawPath(body)
+    p.setPen(_pen(BLUE, 0.7))
+    for y in (6.8, 9.2):
+        p.drawArc(QRectF(3.2, y - 1.6, 8.6, 3.2), 180 * 16, 180 * 16)
+    p.setPen(_pen(BLUE, 0.7))
+    p.setBrush(QBrush(WHITE))
+    p.drawEllipse(QRectF(3.2, 2.8, 8.6, 3.2))
+    # profile badge: orange circle with a white head and shoulders
+    cx = cy = 11.8
+    _fill(p, BLUE)
+    p.drawEllipse(QPointF(cx, cy), 3.4, 3.4)
+    _fill(p, ORANGE)
+    p.drawEllipse(QPointF(cx, cy), 2.75, 2.75)
+    _fill(p, WHITE)
+    p.drawEllipse(QPointF(cx, cy - 0.95), 0.9, 0.9)
+    shoulders = QPainterPath()
+    shoulders.moveTo(cx - 1.65, cy + 1.75)
+    shoulders.cubicTo(cx - 1.45, cy + 0.1, cx + 1.45, cy + 0.1, cx + 1.65, cy + 1.75)
+    shoulders.closeSubpath()
+    p.drawPath(shoulders)
+
+
 # --- QIcon plumbing ---------------------------------------------------------
 class _Engine(QIconEngine):
     def __init__(self, draw):

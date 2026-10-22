@@ -6,8 +6,13 @@ A simple Navicat-style MySQL / MariaDB client for Linux, written in Python with 
 
 ```bash
 ./run.sh                      # creates .venv on first run
-./install-desktop-entry.sh    # optional: add to the application menu
+./install-desktop-entry.sh    # optional: add to the application menu, with the DB Profile icon
+./uninstall-desktop-entry.sh  # remove it again (connections and saved queries are kept)
 ```
+
+The installer renders the app icon as PNGs (16–512 px) into `~/.local/share/icons/hicolor/` and points the menu entry at it. The same icon is used for the window and taskbar.
+
+On GNOME with Wayland, the app runs through XWayland so that GNOME draws its normal title bars and shadows on the main window and on dialogs (GNOME draws no frames for Wayland apps, and Qt's fallback frame has no shadow). To run as a native Wayland app instead, start it with `QT_QPA_PLATFORM=wayland ./run.sh`.
 
 ## Features (v0.1)
 
