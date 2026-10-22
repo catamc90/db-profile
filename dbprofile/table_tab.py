@@ -2,17 +2,37 @@
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
-    QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSpinBox,
-    QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget,
+    QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QSpinBox,
+    QSplitter, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import db, icons
 from .sql_editor import SqlHighlighter
 from .config import ConnectionConfig
-from .result_view import EditableResultModel, ResultModel, ResultView
+from .result_view import EditableResultModel, ResultModel, ResultView, display_value
 from .worker import run_async
 
 q = db.quote_ident
+CELL_EDITOR_MAX_BYTES = 64 * 1024  # binary values are shown as hex, up to this many bytes
+
+
+class _ElidedLabel(QLabel):
+    """A one-line label that ends long text with "…" instead of cutting it off."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._full = ""
+
+    def setText(self, text):
+        self._full = text
+        self._elide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self):
+        super().setText(self.fontMetrics().elidedText(self._full, Qt.TextElideMode.ElideRight, max(0, self.width())))
 
 
 class TableTab(QWidget):
@@ -35,6 +55,8 @@ class TableTab(QWidget):
         # ("first",) | ("after", key) | ("before", key) | ("last", row count of the last page)
         self._anchor = ("first",)
         self._page_keys = None
+        self.hidden_columns: set[str] = set()
+        self._cell_loading = False
         self.busy = False
         self.fqn = f"{q(database)}.{q(table)}"
 
@@ -87,14 +109,25 @@ class TableTab(QWidget):
 
     def _build_data_page(self):
         page = QWidget()
+        # Toolbar like Navicat's table viewer: Cell Editor, Filter & Sort, Columns, Tools
         toolbar = QToolBar()
+        toolbar.setObjectName("tableToolbar")
         toolbar.setIconSize(QSize(16, 16))
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.a_cell_editor = toolbar.addAction(icons.icon("cell_editor"), "Cell Editor")
+        self.a_cell_editor.setToolTip("Show the full value of the current cell, and edit it")
+        self.a_cell_editor.setCheckable(True)
+        self.a_cell_editor.toggled.connect(self._toggle_cell_editor)
         self.a_filter = toolbar.addAction(icons.icon("filter"), "Filter && Sort")
         self.a_filter.setCheckable(True)
         self.a_filter.toggled.connect(self._toggle_filter)
-        toolbar.addAction(icons.icon("import"), "Import", self._import)
-        toolbar.addAction(icons.icon("export"), "Export", self._export)
+        self.columns_menu = QMenu(self)
+        self.columns_menu.aboutToShow.connect(self._fill_columns_menu)
+        toolbar.addWidget(self._menu_button("columns", "Columns", self.columns_menu, "Show or hide columns"))
+        tools_menu = QMenu(self)
+        tools_menu.addAction(icons.icon("import"), "Import Wizard…", self._import)
+        tools_menu.addAction(icons.icon("export"), "Export Wizard…", self._export)
+        toolbar.addWidget(self._menu_button("tools", "Tools", tools_menu))
 
         # Filter bar, hidden until "Filter & Sort" is toggled (like Navicat)
         self.filter_bar = QFrame()
@@ -152,7 +185,7 @@ class TableTab(QWidget):
         bar.addWidget(self._vline())
         bar.addWidget(self._bar_button(self.a_refresh))
         bar.addSpacing(8)
-        self.sql_label = QLabel()
+        self.sql_label = _ElidedLabel()
         self.sql_label.setObjectName("sqlLabel")
         self.sql_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.sql_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -184,14 +217,126 @@ class TableTab(QWidget):
         self.limit.editingFinished.connect(self._apply_filter)
         bar.addWidget(self.limit)
 
+        # Cell editor: a side panel with the current cell's full value, hidden until toggled
+        self.cell_panel = QFrame()
+        self.cell_panel.setObjectName("cellPanel")
+        panel = QVBoxLayout(self.cell_panel)
+        panel.setContentsMargins(0, 0, 0, 0)
+        panel.setSpacing(0)
+        self.cell_head = QLabel()
+        self.cell_head.setObjectName("cellHead")
+        panel.addWidget(self.cell_head)
+        self.cell_edit = QPlainTextEdit()
+        self.cell_edit.setFont(self._mono())
+        self.cell_edit.textChanged.connect(self._cell_text_changed)
+        panel.addWidget(self.cell_edit)
+        self.cell_panel.hide()
+        self.view.selectionModel().currentChanged.connect(self._show_current_cell)
+        self.model.modelReset.connect(self._show_current_cell)
+        self.model.dataChanged.connect(lambda *_: None if self.cell_edit.hasFocus() else self._show_current_cell())
+
+        grid = QSplitter(Qt.Orientation.Horizontal)
+        grid.setHandleWidth(1)
+        grid.setChildrenCollapsible(False)
+        grid.addWidget(self.view)
+        grid.addWidget(self.cell_panel)
+        grid.setStretchFactor(0, 1)
+        grid.setSizes([700, 260])
+
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(toolbar)
         layout.addWidget(self.filter_bar)
-        layout.addWidget(self.view)
+        layout.addWidget(grid, 1)
         layout.addWidget(bottom)
         return page
+
+    @staticmethod
+    def _menu_button(icon, text, menu, tip=None):
+        b = QToolButton()
+        b.setIcon(icons.icon(icon))
+        b.setText(text)
+        b.setToolTip(tip or text)
+        b.setMenu(menu)
+        b.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        b.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        b.setAutoRaise(True)
+        return b
+
+    # cell editor ----------------------------------------------------------
+    def _toggle_cell_editor(self, on):
+        self.cell_panel.setVisible(on)
+        self._show_current_cell()
+
+    def _show_current_cell(self, *_):
+        if not self.cell_panel.isVisible():
+            return
+        idx = self.view.currentIndex()
+        self._cell_loading = True
+        try:
+            if not idx.isValid():
+                head, text, read_only, placeholder = "No cell selected", "", True, ""
+            else:
+                value = self.model.value(idx.row(), idx.column())
+                name = self.model.columns[idx.column()]
+                ctype = self.model.headerData(idx.column(), Qt.Orientation.Horizontal, Qt.ItemDataRole.UserRole + 1)
+                head = f"{name}  ·  {ctype}" if ctype else name
+                if isinstance(value, (bytes, bytearray)):
+                    text = "0x" + bytes(value[:CELL_EDITOR_MAX_BYTES]).hex().upper()
+                    if len(value) > CELL_EDITOR_MAX_BYTES:
+                        text += f"…  ({len(value):,} bytes)"
+                    read_only = True
+                else:
+                    text = "" if value is None else display_value(value)
+                    read_only = not (self.model.flags(idx) & Qt.ItemFlag.ItemIsEditable)
+                placeholder = "(NULL)" if value is None else ""
+                if read_only:
+                    head += "  ·  read only"
+            self.cell_head.setText(head)
+            self.cell_edit.setReadOnly(read_only)
+            self.cell_edit.setPlaceholderText(placeholder)
+            if self.cell_edit.toPlainText() != text:
+                self.cell_edit.setPlainText(text)
+        finally:
+            self._cell_loading = False
+
+    def _cell_text_changed(self):
+        idx = self.view.currentIndex()
+        if self._cell_loading or self.cell_edit.isReadOnly() or not idx.isValid():
+            return
+        text = self.cell_edit.toPlainText()
+        if text == "" and self.model.value(idx.row(), idx.column()) is None:
+            return  # an empty editor on a NULL cell keeps NULL; use Set NULL to clear a value
+        self.model.set_cell(idx.row(), idx.column(), text)
+
+    # columns --------------------------------------------------------------------
+    def _fill_columns_menu(self):
+        menu = self.columns_menu
+        menu.clear()
+        menu.addAction("Show All Columns", self._show_all_columns).setEnabled(bool(self.hidden_columns))
+        menu.addSeparator()
+        for i, name in enumerate(self.model.columns):
+            ctype = self.model.headerData(i, Qt.Orientation.Horizontal, Qt.ItemDataRole.UserRole + 1)
+            action = menu.addAction(f"{name}\t{ctype}" if ctype else name)
+            action.setCheckable(True)
+            action.setChecked(name not in self.hidden_columns)
+            action.toggled.connect(lambda on, n=name: self._set_column_visible(n, on))
+
+    def _set_column_visible(self, name, visible):
+        if visible:
+            self.hidden_columns.discard(name)
+        elif len(self.hidden_columns) + 1 < len(self.model.columns):  # keep at least one column
+            self.hidden_columns.add(name)
+        self._apply_hidden_columns()
+
+    def _show_all_columns(self):
+        self.hidden_columns.clear()
+        self._apply_hidden_columns()
+
+    def _apply_hidden_columns(self):
+        for i, name in enumerate(self.model.columns):
+            self.view.setColumnHidden(i, name in self.hidden_columns)
 
     def _export(self):
         from .transfer_wizards import ExportWizard
@@ -296,7 +441,8 @@ class TableTab(QWidget):
     def _loaded(self, result, count_sql, recount):
         rs, approx = result
         self.model.editable = not self.is_view
-        self.model.set_data(rs.columns, rs.rows)
+        self.model.set_data(rs.columns, rs.rows, rs.types)
+        self._apply_hidden_columns()
         self._page_keys = None
         if rs.rows and self.pk and all(c in rs.columns for c in self.pk):
             cols = [rs.columns.index(c) for c in self.pk]

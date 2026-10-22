@@ -51,7 +51,7 @@ QTreeView, QTreeWidget, QTableView, QListView {
 QTreeView::item { padding: 3px 2px; border: none; }
 QTreeView::item:hover { background: #f0f4fa; }
 QTreeView::item:selected { background: %(SELECTION)s; color: %(TEXT)s; }
-QTableView { gridline-color: #e4e4e4; alternate-background-color: #f8fafc; }
+QTableView { gridline-color: #e9e9e9; alternate-background-color: #f7fafd; }
 QTableView::item { padding: 0 4px; }
 QTableView::item:selected { background: %(SELECTION)s; color: %(TEXT)s; }
 QHeaderView { background: %(PANEL)s; border: none; }
@@ -63,7 +63,10 @@ QHeaderView::section:vertical { color: #8f8f8f; padding: 0 6px; }
 QHeaderView::section:hover { background: #eef1f5; }
 QHeaderView::down-arrow { image: url(%(ICONS)s/arrow_down.png); width: 9px; height: 9px; subcontrol-position: center right; padding-right: 4px; }
 QHeaderView::up-arrow { image: url(%(ICONS)s/arrow_up.png); width: 9px; height: 9px; subcontrol-position: center right; padding-right: 4px; }
-QTableCornerButton::section { background: %(PANEL)s; border: none; border-right: 1px solid #e2e2e2; border-bottom: 1px solid #e2e2e2; }
+QHeaderView#gridHeader, QHeaderView#rowHeader { background: #ffffff; }
+QFrame#cellPanel { background: #ffffff; border-left: 1px solid %(BORDER)s; }
+QLabel#cellHead { background: %(PANEL)s; color: #5a5a5a; padding: 6px 8px; border-bottom: 1px solid %(BORDER)s; }
+QTableCornerButton::section { background: #ffffff; border: none; border-right: 1px solid #e2e2e2; border-bottom: 1px solid #e2e2e2; }
 
 /* editors */
 QPlainTextEdit, QTextEdit { background: #ffffff; border: none; selection-background-color: #b9d4fb; selection-color: %(TEXT)s; }

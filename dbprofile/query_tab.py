@@ -180,7 +180,7 @@ class QueryTab(QWidget):
             if rs.columns is not None:
                 grids += 1
                 view = ResultView()
-                view.setModel(ResultModel(rs.columns, rs.rows, view))
+                view.setModel(ResultModel(rs.columns, rs.rows, view, rs.types))
                 view.fit_columns()
                 self.results.addTab(view, f"Result {grids}")
                 note = f"{rs.rowcount} row(s) returned"

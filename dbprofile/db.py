@@ -35,6 +35,30 @@ class ResultSet:
     rowcount: int
     elapsed: float
     truncated: bool = False
+    types: list[str] | None = None  # base type of each column, e.g. "int", "varchar", "set"
+
+
+# MySQL protocol type codes -> type names, as shown under the column names in result grids
+_TYPE_NAMES = {0: "decimal", 1: "tinyint", 2: "smallint", 3: "int", 4: "float", 5: "double", 6: "null",
+               7: "timestamp", 8: "bigint", 9: "mediumint", 10: "date", 11: "time", 12: "datetime", 13: "year",
+               14: "date", 16: "bit", 245: "json", 246: "decimal", 247: "enum", 248: "set", 255: "geometry"}
+_SET_FLAG, _ENUM_FLAG, _BINARY_CHARSET = 2048, 256, 63
+
+
+def column_type(field) -> str:
+    """Base type of a result column from its protocol metadata (pymysql FieldDescriptorPacket)."""
+    code, binary = field.type_code, field.charsetnr == _BINARY_CHARSET
+    if code in (249, 250, 251, 252):  # tiny/medium/long/plain BLOB and TEXT share these codes
+        return "blob" if binary else "text"
+    if code in (15, 253, 254):  # VARCHAR, VAR_STRING, STRING (CHAR, ENUM and SET arrive as STRING)
+        if field.flags & _SET_FLAG:
+            return "set"
+        if field.flags & _ENUM_FLAG:
+            return "enum"
+        if code == 254:
+            return "binary" if binary else "char"
+        return "varbinary" if binary else "varchar"
+    return _TYPE_NAMES.get(code, "")
 
 
 DELIMITER_RE = re.compile(r"[ \t]*DELIMITER[ \t]+(\S+)[ \t]*(?:\r?\n|$)", re.IGNORECASE)
@@ -135,8 +159,12 @@ def estimated_rows(conn, database: str, table: str) -> int | None:
 
 
 def _read_result(cur, statement, start, max_rows) -> ResultSet:
+    types = None
     if cur.description:
         columns = [d[0] for d in cur.description]
+        fields = getattr(getattr(cur, "_result", None), "fields", None) or []
+        if len(fields) == len(columns):
+            types = [column_type(f) for f in fields]
         rows = list(cur.fetchmany(max_rows))
         truncated = cur.fetchone() is not None
         # Drain any remaining rows so the connection stays usable.
@@ -146,7 +174,7 @@ def _read_result(cur, statement, start, max_rows) -> ResultSet:
     else:
         columns, rows, truncated = None, [], False
         rowcount = cur.rowcount
-    return ResultSet(statement, columns, rows, rowcount, time.perf_counter() - start, truncated)
+    return ResultSet(statement, columns, rows, rowcount, time.perf_counter() - start, truncated, types)
 
 
 def execute(conn, statement: str, args=None, max_rows: int = MAX_FETCH_ROWS) -> ResultSet:

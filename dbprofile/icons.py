@@ -144,6 +144,40 @@ def beautify(p):
     p.drawPath(star)
 
 
+def cell_editor(p):
+    """A text box with a few lines of text and a blue caret."""
+    p.setPen(_pen(LINE, 1))
+    p.setBrush(QBrush(WHITE))
+    p.drawRoundedRect(QRectF(1.5, 2.5, 13, 11), 1.5, 1.5)
+    p.setPen(_pen(DARK, 1.2))
+    p.drawLine(QPointF(4, 6), QPointF(10.5, 6))
+    p.drawLine(QPointF(4, 9), QPointF(8, 9))
+    p.setPen(_pen(BLUE, 1.4))
+    p.drawLine(QPointF(10, 8), QPointF(10, 11.5))
+
+
+def columns(p):
+    """Three columns, the middle one highlighted."""
+    for i, x in enumerate((1.5, 6, 10.5)):
+        p.setPen(_pen(BLUE if i == 1 else LINE, 1))
+        p.setBrush(QBrush(QColor("#dcebfd") if i == 1 else WHITE))
+        p.drawRoundedRect(QRectF(x, 2, 4, 12), 1, 1)
+    _fill(p, BLUE)
+    p.drawRect(QRectF(6.5, 2.5, 3, 2.4))
+
+
+def tools(p):
+    """A wrench."""
+    p.setPen(_pen(DARK, 2.2))
+    p.drawLine(QPointF(3.2, 12.8), QPointF(9, 7))
+    p.setPen(_pen(DARK, 1.6))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath()
+    path.arcMoveTo(QRectF(7.2, 2.2, 6.8, 6.8), 200)
+    path.arcTo(QRectF(7.2, 2.2, 6.8, 6.8), 200, 290)
+    p.drawPath(path)
+
+
 def drop_query(p):
     query(p)
     _badge(p, RED, "x")
