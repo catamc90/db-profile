@@ -31,6 +31,10 @@ class TableTab(QWidget):
         self._count_gen = 0  # increases with every count, so a stale result is ignored
         self._count_thread = None  # server thread id of the running count, to cancel it
         self._last_after_count = False
+        # Keyset paging (see _uses_keyset): where the current page starts, and the keys of its first/last row.
+        # ("first",) | ("after", key) | ("before", key) | ("last", row count of the last page)
+        self._anchor = ("first",)
+        self._page_keys = None
         self.busy = False
         self.fqn = f"{q(database)}.{q(table)}"
 
@@ -224,15 +228,46 @@ class TableTab(QWidget):
         self.busy = False
         self.load_data()
 
+    def _uses_keyset(self):
+        """Page by primary key instead of OFFSET when the rows are in primary key order.
+
+        "WHERE pk > last key ORDER BY pk LIMIT n" reads only the rows it returns, while
+        "LIMIT n OFFSET m" makes the server read and skip m rows first, which is slow on deep pages.
+        """
+        return bool(self.pk) and not self.is_view and not self.order.text().strip()
+
+    def _key_condition(self, op, key):
+        """Rows after (op ">") or before (op "<") key in primary key order; works for composite keys."""
+        terms = []
+        for i, col in enumerate(self.pk):
+            parts = [f"{q(c)} = {self.conn.literal(v)}" for c, v in zip(self.pk[:i], key[:i])]
+            parts.append(f"{q(col)} {op} {self.conn.literal(key[i])}")
+            terms.append(" AND ".join(parts))
+        return "(" + " OR ".join(f"({t})" if len(self.pk) > 1 else t for t in terms) + ")"
+
     def _select_sql(self):
+        """Returns (page SQL, count SQL, whether the page comes back in reverse order)."""
+        where = self.where.text().strip()
         sql = f"SELECT * FROM {self.fqn}"
-        if self.where.text().strip():
-            sql += f" WHERE {self.where.text().strip()}"
-        count_sql = sql.replace("SELECT *", "SELECT COUNT(*)", 1)
-        if self.order.text().strip():
-            sql += f" ORDER BY {self.order.text().strip()}"
-        sql += f" LIMIT {self.limit.value()} OFFSET {self.offset}"
-        return sql, count_sql
+        count_sql = f"SELECT COUNT(*) FROM {self.fqn}" + (f" WHERE {where}" if where else "")
+        limit = self.limit.value()
+        if not self._uses_keyset():
+            if where:
+                sql += f" WHERE {where}"
+            if self.order.text().strip():
+                sql += f" ORDER BY {self.order.text().strip()}"
+            return sql + f" LIMIT {limit} OFFSET {self.offset}", count_sql, False
+        kind = self._anchor[0]
+        conditions = [f"({where})"] if where else []
+        if kind in ("after", "before"):
+            conditions.append(self._key_condition(">" if kind == "after" else "<", self._anchor[1]))
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        # Previous and last pages are read backwards from their end, then reversed.
+        backwards = kind in ("before", "last")
+        sql += " ORDER BY " + ", ".join(f"{q(c)} {'DESC' if backwards else 'ASC'}" for c in self.pk)
+        sql += f" LIMIT {self._anchor[1] if kind == 'last' else limit}"
+        return sql, count_sql, backwards
 
     def load_data(self, recount=True):
         """Fetch the current page. recount=False when only the page changed (the filter is the same)."""
@@ -240,7 +275,7 @@ class TableTab(QWidget):
             return
         if self.model.has_changes() and not self._confirm_discard():
             return
-        sql, count_sql = self._select_sql()
+        sql, count_sql, backwards = self._select_sql()
         self.sql_label.setText(sql)
         self.sql_label.setToolTip(sql)
         self._set_busy(True)
@@ -251,6 +286,8 @@ class TableTab(QWidget):
 
         def fetch():
             rs = db.execute(self.conn, sql, max_rows=self.limit.value())
+            if backwards:
+                rs.rows.reverse()
             # Without a filter the server's row estimate is instant; the exact count replaces it later.
             approx = db.estimated_rows(self.conn, self.database, self.table) if estimate else None
             return rs, approx
@@ -260,6 +297,10 @@ class TableTab(QWidget):
         rs, approx = result
         self.model.editable = not self.is_view
         self.model.set_data(rs.columns, rs.rows)
+        self._page_keys = None
+        if rs.rows and self.pk and all(c in rs.columns for c in self.pk):
+            cols = [rs.columns.index(c) for c in self.pk]
+            self._page_keys = ([rs.rows[0][i] for i in cols], [rs.rows[-1][i] for i in cols])
         self.view.fit_columns()
         if recount:
             if self.offset == 0 and rs.rowcount < self.limit.value():
@@ -324,6 +365,7 @@ class TableTab(QWidget):
 
     def _apply_filter(self):
         self.offset = 0
+        self._anchor = ("first",)
         self.load_data()
 
     def _goto(self, offset):
@@ -335,6 +377,9 @@ class TableTab(QWidget):
                 self._update_actions()
                 return
             offset = max(0, (self.total - 1) // limit * limit)
+            self._anchor = ("last", self.total - offset) if offset else ("first",)
+        else:
+            self._anchor = ("first",)
         if offset != self.offset:
             self.offset = offset
             self.load_data(recount=False)
@@ -342,6 +387,14 @@ class TableTab(QWidget):
     def _page(self, direction):
         new = self.offset + direction * self.limit.value()
         if new >= 0 and (direction < 0 or self._has_next_page()):
+            if new == 0 or not self._uses_keyset():
+                self._anchor = ("first",)
+            elif self._page_keys is None:  # empty page: nothing to continue from, start over
+                self._anchor = ("first",)
+                new = 0
+            else:
+                first_key, last_key = self._page_keys
+                self._anchor = ("after", last_key) if direction > 0 else ("before", first_key)
             self.offset = new
             self.load_data(recount=False)
 

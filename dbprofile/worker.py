@@ -15,11 +15,14 @@ class _Task(QRunnable):
 
     def run(self):
         try:
-            result = self.fn(*self.args)
-        except Exception as e:  # noqa: BLE001
-            self.signals.failed.emit(e)
-        else:
-            self.signals.done.emit(result)
+            try:
+                result = self.fn(*self.args)
+            except Exception as e:  # noqa: BLE001
+                self.signals.failed.emit(e)
+            else:
+                self.signals.done.emit(result)
+        except RuntimeError:
+            pass  # the application quit while this task was running; nobody is left to notify
 
 
 _active: set = set()
