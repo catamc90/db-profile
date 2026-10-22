@@ -1,4 +1,5 @@
 """Thin layer over PyMySQL: connecting, splitting and running SQL."""
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -11,16 +12,46 @@ MAX_FETCH_ROWS = 10000
 
 
 def connect(cfg: ConnectionConfig, database: str | None = None):
-    return pymysql.connect(
-        host=cfg.host,
-        port=int(cfg.port),
-        user=cfg.user,
-        password=cfg.password,
-        database=database or cfg.database or None,
-        charset="utf8mb4",
-        autocommit=True,
-        connect_timeout=10,
-    )
+    options = dict(host=cfg.host, port=int(cfg.port), user=cfg.user, password=cfg.password,
+                   database=database or cfg.database or None, charset="utf8mb4", autocommit=True,
+                   connect_timeout=10, ssl=ssl_context(cfg))
+    if cfg.ssh_enabled:
+        return _TunneledConnection(cfg, **options)
+    return pymysql.connect(**options)
+
+
+def ssl_context(cfg: ConnectionConfig):
+    """The SSLContext for a connection with SSL enabled, or None."""
+    if not cfg.ssl_enabled:
+        return None
+    import ssl
+    verify = cfg.ssl_mode in ("verify_ca", "verify_identity")
+    ctx = ssl.create_default_context(cafile=os.path.expanduser(cfg.ssl_ca) if cfg.ssl_ca else None)
+    ctx.check_hostname = cfg.ssl_mode == "verify_identity"
+    ctx.verify_mode = ssl.CERT_REQUIRED if verify else ssl.CERT_NONE
+    if cfg.ssl_cert:
+        ctx.load_cert_chain(os.path.expanduser(cfg.ssl_cert),
+                            os.path.expanduser(cfg.ssl_key) if cfg.ssl_key else None)
+    return ctx
+
+
+class _TunneledConnection(pymysql.connections.Connection):
+    """A MySQL connection whose socket goes through the connection's SSH tunnel.
+
+    The host stays the real MySQL host, so SSL host name checks still verify the right name,
+    and reconnects (ping(reconnect=True)) go through the tunnel again.
+    """
+
+    def __init__(self, cfg, **options):
+        self._tunnel_cfg = cfg
+        super().__init__(defer_connect=True, **options)
+        self.connect()
+
+    def connect(self, sock=None):
+        if sock is None:
+            from . import ssh_tunnel
+            sock = ssh_tunnel.get_tunnel(self._tunnel_cfg).open_socket(self.connect_timeout)
+        super().connect(sock)
 
 
 def quote_ident(name: str) -> str:

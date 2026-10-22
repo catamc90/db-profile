@@ -145,13 +145,54 @@ def read_ncx(path: str) -> list[ImportedConnection]:
         if not cfg.save_password:
             cfg.password = ""
         if _bool(a.get("SSH")):
-            item.notes.append(f"Uses an SSH tunnel via {a.get('SSH_Host', '')}, which is not supported yet")
+            _read_ssh(a, cfg, item)
+        if _bool(a.get("SSL")):
+            _read_ssl(a, cfg, item)
         if _bool(a.get("HTTP")):
             item.notes.append("Uses an HTTP tunnel, which is not supported")
-        if _bool(a.get("SSL")):
-            item.notes.append("SSL settings are not imported")
         result.append(item)
     return result
+
+
+def _is_windows_path(path: str) -> bool:
+    return len(path) > 2 and path[1] == ":" or "\\" in path
+
+
+def _read_ssh(a, cfg, item):
+    cfg.ssh_enabled = True
+    cfg.ssh_host = a.get("SSH_Host", "")
+    try:
+        cfg.ssh_port = int(a.get("SSH_Port") or 22)
+    except ValueError:
+        cfg.ssh_port = 22
+    cfg.ssh_user = a.get("SSH_UserName", "")
+    cfg.ssh_auth = "key" if (a.get("SSH_AuthenMethod") or "").upper() == "PUBLICKEY" else "password"
+    cfg.ssh_key_file = a.get("SSH_PrivateKey", "")
+    cfg.ssh_save_password = _bool(a.get("SSH_SavePassword", "true")) or _bool(a.get("SSH_SavePassphrase", "false"))
+    secret_attr = "SSH_Passphrase" if cfg.ssh_auth == "key" else "SSH_Password"
+    secret = navicat_decrypt(a.get(secret_attr, ""))
+    if secret is None:
+        item.notes.append("SSH password could not be decrypted; enter it after importing")
+        secret = ""
+    if cfg.ssh_auth == "key":
+        cfg.ssh_passphrase = secret
+    else:
+        cfg.ssh_password = secret
+    item.notes.append(f"SSH tunnel via {cfg.ssh_user + '@' if cfg.ssh_user else ''}{cfg.ssh_host}")
+    if cfg.ssh_auth == "key" and _is_windows_path(cfg.ssh_key_file):
+        item.notes.append(f"Private key path {cfg.ssh_key_file} is a Windows path; update it after importing")
+
+
+def _read_ssl(a, cfg, item):
+    cfg.ssl_enabled = True
+    cfg.ssl_ca = a.get("SSL_CACert", "")
+    if _bool(a.get("SSL_Authen")) or a.get("SSL_ClientCert"):
+        cfg.ssl_cert = a.get("SSL_ClientCert", "")
+        cfg.ssl_key = a.get("SSL_ClientKey", "")
+    cfg.ssl_mode = "verify_ca" if cfg.ssl_ca else "require"
+    item.notes.append("SSL" + (" with CA verification" if cfg.ssl_ca else ""))
+    if any(_is_windows_path(p) for p in (cfg.ssl_ca, cfg.ssl_cert, cfg.ssl_key) if p):
+        item.notes.append("SSL certificate paths are Windows paths; update them after importing")
 
 
 def read_json(path: str) -> list[ImportedConnection]:
@@ -183,6 +224,8 @@ def write_ncx(path: str, connections: list[ConnectionConfig], include_passwords=
     root = ET.Element("Connections", Ver="1.5")
     for c in connections:
         save = include_passwords and c.save_password and bool(c.password)
+        ssh_save = include_passwords and c.ssh_save_password
+        ssh_key = c.ssh_auth == "key"
         ET.SubElement(root, "Connection", {
             "ConnectionName": c.name, "ProjectUUID": "", "ConnType": "MYSQL", "OraConnType": "",
             "ServiceProvider": "Default", "Host": c.host, "Port": str(c.port), "Database": c.database,
@@ -192,7 +235,16 @@ def write_ncx(path: str, connections: list[ConnectionConfig], include_passwords=
             "SavePassword": "true" if save else "false", "SettingsSavePath": "", "SessionLimit": "0",
             "Encoding": "65001", "Keepalive": "false", "KeepaliveInterval": "240", "MySQLCharacterSet": "true",
             "Compression": "false", "AutoConnect": "false", "NamedPipe": "false", "NamedPipeSocket": "",
-            "SSL": "false", "SSH": "false", "HTTP": "false",
+            "SSL": _xml_bool(c.ssl_enabled), "SSL_Authen": _xml_bool(c.ssl_enabled and bool(c.ssl_cert)),
+            "SSL_ClientKey": c.ssl_key, "SSL_ClientCert": c.ssl_cert, "SSL_CACert": c.ssl_ca,
+            "SSH": _xml_bool(c.ssh_enabled), "SSH_Host": c.ssh_host, "SSH_Port": str(c.ssh_port),
+            "SSH_UserName": c.ssh_user, "SSH_AuthenMethod": "PUBLICKEY" if ssh_key else "PASSWORD",
+            "SSH_Password": navicat_encrypt(c.ssh_password) if ssh_save and not ssh_key else "",
+            "SSH_SavePassword": _xml_bool(ssh_save and not ssh_key and bool(c.ssh_password)),
+            "SSH_PrivateKey": c.ssh_key_file,
+            "SSH_Passphrase": navicat_encrypt(c.ssh_passphrase) if ssh_save and ssh_key else "",
+            "SSH_SavePassphrase": _xml_bool(ssh_save and ssh_key and bool(c.ssh_passphrase)),
+            "HTTP": "false",
         })
     ET.indent(root)
     ET.ElementTree(root).write(path, encoding="UTF-8", xml_declaration=True)
@@ -205,9 +257,15 @@ def write_json(path: str, connections: list[ConnectionConfig], include_passwords
         row.pop("id", None)
         if not include_passwords or not c.save_password:
             row["password"] = ""
+        if not include_passwords or not c.ssh_save_password:
+            row["ssh_password"] = row["ssh_passphrase"] = ""
         rows.append(row)
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"app": APP_NAME, "version": APP_VERSION, "connections": rows}, f, indent=2)
+
+
+def _xml_bool(value) -> str:
+    return "true" if value else "false"
 
 
 def can_decrypt() -> bool:

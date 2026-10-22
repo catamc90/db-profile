@@ -16,6 +16,10 @@ On GNOME with Wayland, the app runs through XWayland so that GNOME draws its nor
 
 ## Features (v0.1)
 
+- **SSH tunnel and SSL** (SSH and SSL tabs of the connection dialog, like Navicat):
+  - **SSH**: password or private key (with passphrase; empty uses the SSH agent and `~/.ssh` keys). The MySQL host and port are as seen from the SSH server, e.g. `localhost`. All tabs of a connection share one SSH session, which reconnects if it drops. A new server's host key is remembered in `~/.config/dbprofile/known_hosts` (also reading `~/.ssh/known_hosts`), and a changed key is refused.
+  - **SSL**: *Require* (encrypt only), *Verify CA certificate* (a CA file or the system CAs) or *Verify CA certificate and host name*, plus an optional client certificate and key. Without SSL enabled, connections are still encrypted when the server supports it (MySQL's "preferred" mode), but SSL is not required and certificates are not checked.
+  - Test Connection reports the SSH route and the SSL cipher. Navicat `.ncx` imports and exports include the SSH and SSL settings.
 - **Connections**: save, edit, delete and test connections. They are stored in `~/.config/dbprofile/connections.json` with mode 600. Untick "Save password" to be asked for the password each time.
 - **Import / Export Connections** (File menu, or right-click the connection list):
   - Imports **Navicat `.ncx` files**, including saved passwords from Navicat 12 and later (AES) and Navicat 11 and earlier (Blowfish). MySQL and MariaDB connections are imported; other types are listed and skipped.

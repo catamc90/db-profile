@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QTreeWidgetItem,
 )
 
-from . import APP_NAME, APP_VERSION, db, icons, saved_queries
+from . import APP_NAME, APP_VERSION, db, icons, saved_queries, ssh_tunnel
 from .config import load_connections, save_connections
 from .connection_dialog import ConnectionDialog
 from .connections_dialogs import ExportConnectionsDialog, ImportConnectionsDialog
@@ -265,7 +265,7 @@ class MainWindow(QMainWindow):
     def _add_connection_item(self, cfg):
         item = QTreeWidgetItem([cfg.name])
         item.setIcon(0, self.icons["connection_closed"])
-        item.setToolTip(0, f"{cfg.user}@{cfg.host}:{cfg.port}")
+        item.setToolTip(0, cfg.address())
         item.setData(0, ROLE, {"kind": CONNECTION, "id": cfg.id})
         self._add_placeholder(item)
         self.tree.addTopLevelItem(item)
@@ -293,6 +293,14 @@ class MainWindow(QMainWindow):
                 if not ok:
                     raise ConnectionAbortedError("Cancelled")
                 cfg.password = pw
+            if cfg.ssh_enabled and cfg.ssh_auth == "password" and not cfg.ssh_password \
+                    and not cfg.ssh_save_password:
+                pw, ok = QInputDialog.getText(self, "SSH Password",
+                                              f"SSH password for {cfg.ssh_user}@{cfg.ssh_host}:",
+                                              echo=QLineEdit.EchoMode.Password)
+                if not ok:
+                    raise ConnectionAbortedError("Cancelled")
+                cfg.ssh_password = pw
             conn = db.connect(cfg)
             self.open_conns[cfg.id] = conn
         return conn
@@ -686,8 +694,9 @@ class MainWindow(QMainWindow):
             self.connections[self.connections.index(cfg)] = new
             save_connections(self.connections)
             self.disconnect(top)
+            ssh_tunnel.close(cfg.id)  # settings may have changed; the next connection opens a new tunnel
             top.setText(0, new.name)
-            top.setToolTip(0, f"{new.user}@{new.host}:{new.port}")
+            top.setToolTip(0, new.address())
 
     def _top_item(self, cfg_id):
         for i in range(self.tree.topLevelItemCount()):
@@ -708,8 +717,9 @@ class MainWindow(QMainWindow):
                 top = self._top_item(old.id)
                 if top is not None:
                     self.disconnect(top)
+                    ssh_tunnel.close(old.id)
                     top.setText(0, cfg.name)
-                    top.setToolTip(0, f"{cfg.user}@{cfg.host}:{cfg.port}")
+                    top.setToolTip(0, cfg.address())
                 self.connections[self.connections.index(old)] = cfg
                 replaced += 1
             else:
@@ -750,6 +760,7 @@ class MainWindow(QMainWindow):
         self._forget_conn(top)
         self.connections.remove(cfg)
         save_connections(self.connections)
+        ssh_tunnel.close(cfg.id)
         if delete_queries:
             saved_queries.delete_connection(cfg.id)
         self.tree.takeTopLevelItem(self.tree.indexOfTopLevelItem(top))
@@ -1016,6 +1027,7 @@ class MainWindow(QMainWindow):
                 conn.close()
             except Exception:  # noqa: BLE001
                 pass
+        ssh_tunnel.close_all()
         QSettings("dbprofile", "dbprofile").setValue("geometry", self.saveGeometry())
         event.accept()
 

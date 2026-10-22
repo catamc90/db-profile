@@ -3,3 +3,4 @@ PyMySQL>=1.1
 openpyxl>=3.1
 cryptography>=3.4
 sqlparse>=0.4
+paramiko>=2.7
