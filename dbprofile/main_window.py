@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
 from . import APP_NAME, APP_VERSION, db, icons
 from .config import load_connections, save_connections
 from .connection_dialog import ConnectionDialog
+from .connections_dialogs import ExportConnectionsDialog, ImportConnectionsDialog
 from .objects_tab import ROUTINE, ObjectsTab
 from .query_tab import QueryTab
 from .routine_tab import RoutineTab
@@ -135,6 +136,10 @@ class MainWindow(QMainWindow):
 
         menu = self.menuBar().addMenu("&File")
         menu.addAction(icons.icon("connection"), "New Connection…", self.new_connection)
+        menu.addSeparator()
+        menu.addAction(icons.icon("import"), "Import Connections…", self.import_connections)
+        menu.addAction(icons.icon("export"), "Export Connections…", self.export_connections)
+        menu.addSeparator()
         menu.addAction(new_query)
         menu.addAction(close_tab)
         menu.addSeparator()
@@ -155,6 +160,9 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         if item is None:
             menu.addAction("New Connection…", self.new_connection)
+            menu.addSeparator()
+            menu.addAction(icons.icon("import"), "Import Connections…", self.import_connections)
+            menu.addAction(icons.icon("export"), "Export Connections…", self.export_connections)
         else:
             kind = item.data(0, ROLE)["kind"]
             if kind == CONNECTION:
@@ -171,6 +179,8 @@ class MainWindow(QMainWindow):
                 menu.addAction("Refresh", lambda: self.refresh(item))
                 menu.addSeparator()
                 menu.addAction("Edit Connection…", lambda: self.edit_connection(item))
+                menu.addAction(icons.icon("export"), "Export Connection…",
+                               lambda: self.export_connections(self._cfg(item)[0].id))
                 menu.addAction("Delete Connection", lambda: self.delete_connection(item))
             elif kind == GROUP:
                 info = item.data(0, ROLE)
@@ -188,6 +198,11 @@ class MainWindow(QMainWindow):
                 menu.addAction(icons.icon("drop_function"), "Delete Function…", lambda: self.drop_routine(item))
             elif kind == DATABASE:
                 cfg, database = self._cfg(item)[0], item.data(0, ROLE)["db"]
+                if self._is_loaded(item):
+                    menu.addAction(icons.icon("database_closed"), "Close Database", lambda: self.close_database(item))
+                else:
+                    menu.addAction(icons.icon("database"), "Open Database", lambda: item.setExpanded(True))
+                menu.addSeparator()
                 menu.addAction("New Query", lambda: self.new_query(item))
                 menu.addSeparator()
                 menu.addAction(icons.icon("import"), "Import Wizard…", lambda: self.import_wizard(cfg, database))
@@ -570,6 +585,35 @@ class MainWindow(QMainWindow):
             except Exception:  # noqa: BLE001
                 pass
 
+    @staticmethod
+    def _is_loaded(item):
+        """True once a tree node's children have been fetched (it is not just a placeholder)."""
+        return not (item.childCount() == 1 and item.child(0).data(0, ROLE)["kind"] == PLACEHOLDER)
+
+    def close_database(self, item):
+        """Close an opened database: its table/function tabs, the Objects list and its tree node."""
+        cfg, _ = self._cfg(item)
+        database = item.data(0, ROLE)["db"]
+        tabs = [self.tabs.widget(i) for i in range(self.tabs.count())
+                if isinstance(self.tabs.widget(i), (TableTab, RoutineTab))
+                and (self.tabs.widget(i).cfg.id, self.tabs.widget(i).database) == (cfg.id, database)]
+        for w in tabs:
+            if not self.close_tab(self.tabs.indexOf(w)):
+                return  # the user kept a tab with unsaved changes; leave the database open
+        # Block tree signals: moving the selection would otherwise reload the Objects list.
+        self.tree.blockSignals(True)
+        try:
+            self.tree.setCurrentItem(item)
+            item.setExpanded(False)
+            item.takeChildren()
+            self._add_placeholder(item)
+            item.setIcon(0, self.icons["database_closed"])
+        finally:
+            self.tree.blockSignals(False)
+        if (self.objects.cfg, self.objects.database) == (cfg, database):
+            self.objects.clear()
+        self._status(f"Closed database {database}")
+
     def disconnect(self, item):
         cfg, _ = self._cfg(item)
         if self.objects.cfg is cfg:
@@ -601,6 +645,44 @@ class MainWindow(QMainWindow):
             self.disconnect(top)
             top.setText(0, new.name)
             top.setToolTip(0, f"{new.user}@{new.host}:{new.port}")
+
+    def _top_item(self, cfg_id):
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            if top.data(0, ROLE)["id"] == cfg_id:
+                return top
+        return None
+
+    def import_connections(self, path=None):
+        dlg = ImportConnectionsDialog(self.connections, self)
+        if path:
+            dlg.load(path)
+        if not dlg.exec():
+            return
+        added = replaced = 0
+        for cfg, old in dlg.result_plan():
+            if old is not None:
+                top = self._top_item(old.id)
+                if top is not None:
+                    self.disconnect(top)
+                    top.setText(0, cfg.name)
+                    top.setToolTip(0, f"{cfg.user}@{cfg.host}:{cfg.port}")
+                self.connections[self.connections.index(old)] = cfg
+                replaced += 1
+            else:
+                self.connections.append(cfg)
+                self._add_connection_item(cfg)
+                added += 1
+        save_connections(self.connections)
+        self._status(f"Imported connections: {added} added, {replaced} replaced")
+
+    def export_connections(self, selected_id=None):
+        if not self.connections:
+            QMessageBox.information(self, APP_NAME, "There are no connections to export.")
+            return
+        dlg = ExportConnectionsDialog(self.connections, selected_id, self)
+        if dlg.exec():
+            self._status(f"Connections exported to {dlg.saved_path}")
 
     def delete_connection(self, item):
         cfg, top = self._cfg(item)

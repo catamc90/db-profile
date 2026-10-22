@@ -125,6 +125,16 @@ QCheckBox { spacing: 6px; }
 QCheckBox::indicator { width: 14px; height: 14px; border: 1px solid #b5b5b5; border-radius: 3px; background: #ffffff; }
 QCheckBox::indicator:hover { border-color: %(ACCENT)s; }
 QCheckBox::indicator:checked { background: %(ACCENT)s; border-color: %(ACCENT)s; image: url(%(ICONS)s/check.png); }
+QCheckBox::indicator:indeterminate { background: %(ACCENT)s; border-color: %(ACCENT)s; image: url(%(ICONS)s/dash.png); }
+QCheckBox[changed="true"] { color: %(ACCENT)s; font-weight: 600; }
+QCheckBox#groupHead { font-weight: 600; }
+
+/* privilege groups (user editor) */
+QFrame#privGroup { background: #ffffff; border: 1px solid #e3e3e3; border-radius: 4px; }
+QFrame#privGroup QCheckBox { background: transparent; }
+QFrame#hline { background: #ececec; max-height: 1px; min-height: 1px; border: none; }
+QPushButton#chip { min-width: 0; padding: 3px 10px; border-radius: 11px; background: #ffffff; }
+QPushButton#chip:hover { border-color: %(ACCENT)s; color: %(ACCENT)s; }
 
 QRadioButton { spacing: 6px; }
 QRadioButton::indicator { width: 14px; height: 14px; border: 1px solid #b5b5b5; border-radius: 8px; background: #ffffff; }
@@ -205,6 +215,7 @@ def _write_glyphs() -> str:
         "arrow_down": icons.arrow_down,
         "arrow_up": icons.arrow_up,
         "check": icons.check,
+        "dash": icons.dash,
     }
     for name, draw in glyphs.items():
         icons.save_png(draw, os.path.join(cache, f"{name}.png"), 16)

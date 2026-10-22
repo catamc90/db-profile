@@ -349,6 +349,11 @@ def check(p, color=WHITE):
     p.drawPolyline(_poly((3.5, 8.5), (6.8, 11.5), (12.5, 4.8)))
 
 
+def dash(p, color=WHITE):
+    p.setPen(_pen(color, 2))
+    p.drawLine(QPointF(4.5, 8), QPointF(11.5, 8))
+
+
 # --- QIcon plumbing ---------------------------------------------------------
 class _Engine(QIconEngine):
     def __init__(self, draw):

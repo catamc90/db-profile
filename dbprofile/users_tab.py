@@ -1,35 +1,221 @@
 """User management: list MySQL accounts, create/edit/delete them, manage privileges."""
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QKeySequence, QShortcut
+from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog,
-    QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QTableWidget, QTableWidgetItem,
-    QTabWidget, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
+    QCheckBox, QDialog, QDialogButtonBox, QFormLayout, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QSplitter,
+    QStackedWidget, QTabWidget, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget,
 )
 
-from . import db, icons
+from . import db, icons, theme
 from .config import ConnectionConfig
 from .sql_editor import SqlHighlighter
 
 q = db.quote_ident
 
-# Static privileges that can be granted ON *.* (server level).
-SERVER_PRIVILEGES = [
-    "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "INDEX", "ALTER", "REFERENCES",
-    "CREATE VIEW", "SHOW VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "EXECUTE", "TRIGGER", "EVENT",
-    "CREATE TEMPORARY TABLES", "LOCK TABLES", "SHOW DATABASES", "PROCESS", "RELOAD", "SHUTDOWN", "FILE",
-    "SUPER", "CREATE USER", "REPLICATION SLAVE", "REPLICATION CLIENT", "CREATE TABLESPACE",
+# Privileges grouped the way they are usually thought about. Database-level privileges are the
+# first four groups; the server level (ON *.*) adds administration.
+GROUPS = [
+    ("Data", ["SELECT", "INSERT", "UPDATE", "DELETE"]),
+    ("Structure", ["CREATE", "DROP", "ALTER", "INDEX", "REFERENCES", "CREATE VIEW", "SHOW VIEW", "TRIGGER"]),
+    ("Routines & Events", ["CREATE ROUTINE", "ALTER ROUTINE", "EXECUTE", "EVENT"]),
+    ("Other", ["CREATE TEMPORARY TABLES", "LOCK TABLES"]),
 ]
-# Privileges that can be granted ON `db`.* (database level).
-DATABASE_PRIVILEGES = [
-    "SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "INDEX", "ALTER", "REFERENCES",
-    "CREATE VIEW", "SHOW VIEW", "CREATE ROUTINE", "ALTER ROUTINE", "EXECUTE", "TRIGGER", "EVENT",
-    "CREATE TEMPORARY TABLES", "LOCK TABLES",
-]
+ADMIN_GROUP = ("Administration", ["CREATE USER", "PROCESS", "RELOAD", "SHUTDOWN", "SUPER", "FILE", "SHOW DATABASES",
+                                  "REPLICATION SLAVE", "REPLICATION CLIENT", "CREATE TABLESPACE"])
+SERVER_GROUPS = GROUPS + [ADMIN_GROUP]
+
+DATABASE_PRIVILEGES = [p for _, privs in GROUPS for p in privs]
+SERVER_PRIVILEGES = [p for _, privs in SERVER_GROUPS for p in privs]
+
+DESCRIPTIONS = {
+    "SELECT": "Read rows", "INSERT": "Add rows", "UPDATE": "Change rows", "DELETE": "Remove rows",
+    "CREATE": "Create databases and tables", "DROP": "Drop databases, tables and views",
+    "ALTER": "Change table structure", "INDEX": "Create and drop indexes", "REFERENCES": "Create foreign keys",
+    "CREATE VIEW": "Create views", "SHOW VIEW": "See view definitions", "TRIGGER": "Create and drop triggers",
+    "CREATE ROUTINE": "Create functions and procedures", "ALTER ROUTINE": "Change and drop functions and procedures",
+    "EXECUTE": "Run functions and procedures", "EVENT": "Create and change scheduled events",
+    "CREATE TEMPORARY TABLES": "Create temporary tables", "LOCK TABLES": "Use LOCK TABLES",
+    "CREATE USER": "Create, rename and drop users", "PROCESS": "See every running query (SHOW PROCESSLIST)",
+    "RELOAD": "Run FLUSH operations", "SHUTDOWN": "Shut down the server",
+    "SUPER": "Administrative operations such as KILL and SET GLOBAL",
+    "FILE": "Read and write files on the server host", "SHOW DATABASES": "See all database names",
+    "REPLICATION SLAVE": "Read the binary log as a replica", "REPLICATION CLIENT": "Ask for replication status",
+    "CREATE TABLESPACE": "Create and drop tablespaces",
+}
+
+READ_ONLY = {"SELECT", "SHOW VIEW"}
+READ_WRITE = READ_ONLY | {"INSERT", "UPDATE", "DELETE", "EXECUTE", "CREATE TEMPORARY TABLES", "LOCK TABLES"}
+PRESETS = [("Read Only", READ_ONLY), ("Read/Write", READ_WRITE), ("All", None), ("None", set())]
 
 
 def _title(priv):
     return priv.title()
+
+
+def summarize(privileges, available=DATABASE_PRIVILEGES):
+    privs = set(privileges) & set(available)
+    if not privs:
+        return "No access"
+    if privs == set(available):
+        return "All privileges"
+    if privs == READ_ONLY:
+        return "Read only"
+    if privs == READ_WRITE:
+        return "Read/Write"
+    return f"{len(privs)} privilege{'s' if len(privs) != 1 else ''}"
+
+
+def _set_changed(widget, changed):
+    """Mark a checkbox as different from what is stored on the server (styled by the theme)."""
+    if widget.property("changed") != changed:
+        widget.setProperty("changed", changed)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+
+
+class PrivilegePanel(QWidget):
+    """Privilege checkboxes in titled groups, each with a tri-state "select group" box."""
+
+    changed = pyqtSignal()
+
+    def __init__(self, groups, parent=None):
+        super().__init__(parent)
+        self.boxes: dict[str, QCheckBox] = {}
+        self.group_boxes = []
+        self.original: set[str] = set()
+        self._updating = False
+        grid = QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        for i, (title, privs) in enumerate(groups):
+            frame = QFrame()
+            frame.setObjectName("privGroup")
+            box = QVBoxLayout(frame)
+            box.setContentsMargins(12, 8, 12, 10)
+            box.setSpacing(5)
+            head = QCheckBox(title.replace("&", "&&"))  # "&" would otherwise mark a shortcut key
+            head.setObjectName("groupHead")
+            head.setTristate(True)
+            head.clicked.connect(lambda _, h=head, p=privs: self._toggle_group(h, p))
+            box.addWidget(head)
+            line = QFrame()
+            line.setObjectName("hline")
+            box.addWidget(line)
+            for priv in privs:
+                cb = QCheckBox(_title(priv))
+                cb.setToolTip(f"{priv}\n{DESCRIPTIONS.get(priv, '')}")
+                cb.toggled.connect(self._on_toggle)
+                self.boxes[priv] = cb
+                box.addWidget(cb)
+            box.addStretch(1)
+            self.group_boxes.append((head, privs))
+            grid.addWidget(frame, i // 2, i % 2)
+        grid.setRowStretch(grid.rowCount(), 1)
+
+    def _toggle_group(self, head, privs):
+        on = head.checkState() != Qt.CheckState.Unchecked
+        if head.checkState() == Qt.CheckState.PartiallyChecked:
+            on = True  # clicking a partly checked group selects all of it
+        self._updating = True
+        for p in privs:
+            self.boxes[p].setChecked(on)
+        self._updating = False
+        self._refresh()
+
+    def _on_toggle(self, _):
+        if not self._updating:
+            self._refresh()
+
+    def _refresh(self):
+        for head, privs in self.group_boxes:
+            n = sum(self.boxes[p].isChecked() for p in privs)
+            head.setCheckState(Qt.CheckState.Checked if n == len(privs) else
+                               Qt.CheckState.Unchecked if n == 0 else Qt.CheckState.PartiallyChecked)
+        for priv, cb in self.boxes.items():
+            _set_changed(cb, cb.isChecked() != (priv in self.original))
+        self.changed.emit()
+
+    def set_privileges(self, privileges, original=None):
+        self._updating = True
+        for priv, cb in self.boxes.items():
+            cb.setChecked(priv in privileges)
+        self._updating = False
+        if original is not None:
+            self.original = set(original)
+        self._refresh()
+
+    def privileges(self) -> set[str]:
+        return {p for p, cb in self.boxes.items() if cb.isChecked()}
+
+    def apply_preset(self, preset):
+        self.set_privileges(set(self.boxes) if preset is None else preset & set(self.boxes))
+
+    def filter(self, text):
+        text = text.strip().lower()
+        for priv, cb in self.boxes.items():
+            cb.setVisible(not text or text in priv.lower() or text in DESCRIPTIONS.get(priv, "").lower())
+
+
+def _preset_bar(panel, presets, extra=()):
+    row = QHBoxLayout()
+    row.setSpacing(6)
+    label = QLabel("Quick set:")
+    label.setObjectName("muted")
+    row.addWidget(label)
+    for text, preset in list(presets) + list(extra):
+        b = QPushButton(text)
+        b.setAutoDefault(False)
+        b.setObjectName("chip")
+        b.clicked.connect(lambda _, p=preset: panel.apply_preset(p) if not callable(p) else p())
+        row.addWidget(b)
+    row.addStretch(1)
+    return row
+
+
+class AddDatabasesDialog(QDialog):
+    """Pick one or more databases (or type a pattern such as app\\_%) to grant privileges on."""
+
+    def __init__(self, databases, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add Privilege")
+        self.resize(360, 420)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(self._filter)
+        self.list = QListWidget()
+        for name in databases:
+            it = QListWidgetItem(icons.icon("database"), name)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Unchecked)
+            self.list.addItem(it)
+        self.list.itemClicked.connect(lambda it: it.setCheckState(
+            Qt.CheckState.Unchecked if it.checkState() == Qt.CheckState.Checked else Qt.CheckState.Checked))
+        self.pattern = QLineEdit()
+        self.pattern.setPlaceholderText("or a pattern, e.g. app\\_%")
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Add")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.search)
+        layout.addWidget(self.list, 1)
+        layout.addWidget(self.pattern)
+        layout.addWidget(buttons)
+
+    def _filter(self, text):
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            it.setHidden(bool(text) and text.lower() not in it.text().lower())
+
+    def selected(self):
+        names = [self.list.item(i).text() for i in range(self.list.count())
+                 if self.list.item(i).checkState() == Qt.CheckState.Checked]
+        if self.pattern.text().strip():
+            names.append(self.pattern.text().strip())
+        return names
 
 
 class UserDialog(QDialog):
@@ -40,8 +226,8 @@ class UserDialog(QDialog):
         self.conn = conn
         self.account = account  # (user, host) when editing
         self.lock_supported = lock_supported
-        self.setWindowTitle(f"Edit User {account[0]}@{account[1]}" if account else "New User")
-        self.resize(760, 540)
+        self.setWindowTitle(f"Edit User — {account[0]}@{account[1]}" if account else "New User")
+        self.resize(860, 620)
 
         if account:
             self.orig_global, self.orig_grant_option, self.orig_db = db.user_privileges(conn, *account)
@@ -49,6 +235,11 @@ class UserDialog(QDialog):
         else:
             self.orig_global, self.orig_grant_option, self.orig_db, self.orig_locked = set(), False, {}, False
         self.all_databases = databases
+        # Database privileges being edited: {database: set of privileges}
+        self.db_privs = {name: set(privs) & set(DATABASE_PRIVILEGES) for name, privs in self.orig_db.items()}
+        self.current_db = None
+        self.pending = QLabel()  # created first: the pages report changes while they are built
+        self.pending.setObjectName("muted")
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("subTabs")
@@ -65,10 +256,14 @@ class UserDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.save)
         buttons.rejected.connect(self.reject)
+        bottom = QHBoxLayout()
+        bottom.addWidget(self.pending, 1)
+        bottom.addWidget(buttons)
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.tabs)
-        layout.addWidget(buttons)
+        layout.addLayout(bottom)
+        self._update_summary()
 
     def _is_locked(self, user, host):
         rows = db.execute(self.conn, "SELECT account_locked FROM mysql.user WHERE User = %s AND Host = %s",
@@ -92,6 +287,9 @@ class UserDialog(QDialog):
         self.locked = QCheckBox("Account locked")
         self.locked.setChecked(self.orig_locked)
         self.locked.setVisible(lock_supported)
+        for w in (self.user, self.host, self.password, self.confirm):
+            w.textChanged.connect(self._update_summary)
+        self.locked.toggled.connect(self._update_summary)
         form.addRow("User name:", self.user)
         form.addRow("Host:", self.host)
         form.addRow("Password:", self.password)
@@ -103,102 +301,188 @@ class UserDialog(QDialog):
         page = QWidget()
         outer = QVBoxLayout(page)
         outer.setContentsMargins(16, 12, 16, 12)
-        hint = QLabel("Privileges on all databases (ON *.*).")
+        top = QHBoxLayout()
+        hint = QLabel("Privileges on <b>all databases</b> (ON *.*). Changed items are shown in blue.")
         hint.setObjectName("muted")
-        outer.addWidget(hint)
-        grid = QGridLayout()
-        self.server_boxes = {}
-        for i, priv in enumerate(SERVER_PRIVILEGES):
-            box = QCheckBox(_title(priv))
-            box.setChecked(priv in self.orig_global)
-            self.server_boxes[priv] = box
-            grid.addWidget(box, i // 3, i % 3)
-        outer.addLayout(grid)
-        self.grant_option = QCheckBox("Grant Option (may grant its privileges to others)")
+        top.addWidget(hint, 1)
+        search = QLineEdit()
+        search.setPlaceholderText("Search privileges")
+        search.setClearButtonEnabled(True)
+        search.setFixedWidth(200)
+        top.addWidget(search)
+        outer.addLayout(top)
+
+        self.server_panel = PrivilegePanel(SERVER_GROUPS)
+        self.server_panel.set_privileges(self.orig_global, original=self.orig_global)
+        self.server_panel.changed.connect(self._update_summary)
+        search.textChanged.connect(self.server_panel.filter)
+        outer.addLayout(_preset_bar(self.server_panel, PRESETS, [
+            ("Reset", lambda: self.server_panel.set_privileges(self.orig_global))]))
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        holder = QWidget()
+        holder_layout = QVBoxLayout(holder)
+        holder_layout.setContentsMargins(0, 4, 0, 0)
+        holder_layout.addWidget(self.server_panel)
+        self.grant_option = QCheckBox("Grant Option — may give its own privileges to other users")
         self.grant_option.setChecked(self.orig_grant_option)
-        outer.addWidget(self.grant_option)
+        self.grant_option.toggled.connect(lambda on: (_set_changed(self.grant_option, on != self.orig_grant_option),
+                                                      self._update_summary()))
+        holder_layout.addWidget(self.grant_option)
         extra = sorted(self.orig_global - set(SERVER_PRIVILEGES))
         if extra:
-            note = QLabel("Also granted (not changed here): " + ", ".join(extra))
+            note = QLabel("Also granted (dynamic privileges, not changed here): " + ", ".join(extra))
             note.setWordWrap(True)
             note.setObjectName("muted")
-            outer.addWidget(note)
-        row = QHBoxLayout()
-        for text, value in (("Select All", True), ("Clear All", False)):
-            b = QPushButton(text)
-            b.setAutoDefault(False)
-            b.clicked.connect(lambda _, v=value: [x.setChecked(v) for x in self.server_boxes.values()])
-            row.addWidget(b)
-        row.addStretch(1)
-        outer.addLayout(row)
-        outer.addStretch(1)
+            holder_layout.addWidget(note)
+        holder_layout.addStretch(1)
+        scroll.setWidget(holder)
+        outer.addWidget(scroll, 1)
         return page
 
     def _database_page(self):
         page = QWidget()
-        outer = QVBoxLayout(page)
+        outer = QHBoxLayout(page)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
+        splitter = QSplitter()
+        splitter.setHandleWidth(1)
+        splitter.setChildrenCollapsible(False)
+
+        # left: databases with access
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(0)
         bar = QToolBar()
         bar.setIconSize(QSize(16, 16))
         bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        bar.addAction(icons.icon("add"), "Add Privilege", self._add_database)
-        bar.addAction(icons.icon("remove"), "Delete Privilege", self._remove_database)
-        outer.addWidget(bar)
-        self.db_table = QTableWidget(0, len(DATABASE_PRIVILEGES) + 1)
-        self.db_table.setHorizontalHeaderLabels(["Database"] + [_title(p) for p in DATABASE_PRIVILEGES])
-        self.db_table.verticalHeader().hide()
-        header = self.db_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        fm = header.fontMetrics()
-        for c in range(self.db_table.columnCount()):
-            # stylesheet padding is not part of the size hint, so size the columns from the label text
-            label = self.db_table.horizontalHeaderItem(c).text()
-            self.db_table.setColumnWidth(c, max(fm.horizontalAdvance(label) + 28, 140 if c == 0 else 0))
-        self.db_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        outer.addWidget(self.db_table)
-        for name in sorted(self.orig_db):
-            self._add_db_row(name, self.orig_db[name])
+        bar.addAction(icons.icon("add"), "Add Privilege", self._add_databases)
+        self.a_remove_db = bar.addAction(icons.icon("remove"), "Remove", self._remove_databases)
+        left_layout.addWidget(bar)
+        self.db_list = QTreeWidget()
+        self.db_list.setHeaderLabels(["Database", "Access"])
+        self.db_list.setRootIsDecorated(False)
+        self.db_list.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        self.db_list.currentItemChanged.connect(self._db_selected)
+        left_layout.addWidget(self.db_list)
+
+        # right: privileges of the selected database
+        self.db_stack = QStackedWidget()
+        empty = QLabel("Add a database on the left to grant privileges on it.")
+        empty.setObjectName("muted")
+        empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        detail = QWidget()
+        detail_layout = QVBoxLayout(detail)
+        detail_layout.setContentsMargins(16, 12, 16, 12)
+        self.db_title = QLabel()
+        detail_layout.addWidget(self.db_title)
+        self.db_panel = PrivilegePanel(GROUPS)
+        self.db_panel.changed.connect(self._db_privs_changed)
+        detail_layout.addLayout(_preset_bar(self.db_panel, PRESETS))
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(self.db_panel)
+        detail_layout.addWidget(scroll, 1)
+        self.db_stack.addWidget(empty)
+        self.db_stack.addWidget(detail)
+
+        splitter.addWidget(left)
+        splitter.addWidget(self.db_stack)
+        splitter.setSizes([260, 560])
+        outer.addWidget(splitter)
+        self._fill_db_list()
         return page
 
-    def _add_db_row(self, name, privileges=()):
-        r = self.db_table.rowCount()
-        self.db_table.insertRow(r)
-        item = QTableWidgetItem(icons.icon("database"), name)
-        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-        self.db_table.setItem(r, 0, item)
-        for c, priv in enumerate(DATABASE_PRIVILEGES, start=1):
-            holder = QWidget()
-            box = QCheckBox()
-            box.setChecked(priv in privileges)
-            row = QHBoxLayout(holder)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            row.addWidget(box)
-            self.db_table.setCellWidget(r, c, holder)
+    # database privileges --------------------------------------------------------
+    def _fill_db_list(self, select=None):
+        self.db_list.blockSignals(True)
+        self.db_list.clear()
+        for name in sorted(set(self.db_privs) | set(self.orig_db)):
+            it = QTreeWidgetItem([name, ""])
+            it.setIcon(0, icons.icon("database"))
+            it.setData(0, Qt.ItemDataRole.UserRole, name)
+            self.db_list.addTopLevelItem(it)
+            self._update_db_item(it)
+        self.db_list.resizeColumnToContents(0)
+        self.db_list.setColumnWidth(0, max(self.db_list.columnWidth(0) + 12, 130))
+        self.db_list.blockSignals(False)
+        target = select or (self.db_list.topLevelItem(0).text(0) if self.db_list.topLevelItemCount() else None)
+        for i in range(self.db_list.topLevelItemCount()):
+            if self.db_list.topLevelItem(i).text(0) == target:
+                self.db_list.setCurrentItem(self.db_list.topLevelItem(i))
+                break
+        else:
+            self._db_selected(None, None)
 
-    def _db_rows(self):
-        rows = {}
-        for r in range(self.db_table.rowCount()):
-            name = self.db_table.item(r, 0).text()
-            rows[name] = {p for c, p in enumerate(DATABASE_PRIVILEGES, start=1) if self._box(r, c).isChecked()}
-        return rows
+    def _update_db_item(self, it):
+        name = it.data(0, Qt.ItemDataRole.UserRole)
+        privs = self.db_privs.get(name, set())
+        removed = name not in self.db_privs
+        it.setText(1, "Removed" if removed else summarize(privs))
+        changed = removed or privs != (self.orig_db.get(name, set()) & set(DATABASE_PRIVILEGES))
+        font = it.font(0)
+        font.setItalic(removed)
+        for col in (0, 1):
+            it.setFont(col, font)
+            it.setForeground(col, QColor(theme.MUTED if removed else theme.ACCENT if changed else theme.TEXT))
 
-    def _box(self, row, col) -> QCheckBox:
-        return self.db_table.cellWidget(row, col).findChild(QCheckBox)
+    def _db_selected(self, current, _previous):
+        name = current.data(0, Qt.ItemDataRole.UserRole) if current else None
+        self.current_db = name
+        if name is None:
+            self.db_stack.setCurrentIndex(0)
+            return
+        self.db_stack.setCurrentIndex(1)
+        self.db_title.setText(f"Privileges on <b>{name}</b>.*")
+        if name not in self.db_privs:  # selecting a removed database restores it for editing
+            self.db_privs[name] = set()
+        self.db_panel.set_privileges(self.db_privs[name], original=self.orig_db.get(name, set()))
 
-    def _add_database(self):
-        present = set(self._db_rows())
-        choices = [d for d in self.all_databases if d not in present]
-        name, ok = QInputDialog.getItem(self, "Add Privilege", "Database (wildcards like app\\_% allowed):",
-                                        choices, 0, True)
-        name = name.strip()
-        if ok and name and name not in present:
-            self._add_db_row(name, {"SELECT"})
+    def _db_privs_changed(self):
+        if self.current_db is None:
+            return
+        self.db_privs[self.current_db] = self.db_panel.privileges()
+        it = self.db_list.currentItem()
+        if it is not None:
+            self._update_db_item(it)
+        self._update_summary()
 
-    def _remove_database(self):
-        for r in sorted({i.row() for i in self.db_table.selectedIndexes()}, reverse=True):
-            self.db_table.removeRow(r)
+    def _add_databases(self):
+        choices = [d for d in self.all_databases if d not in self.db_privs]
+        dlg = AddDatabasesDialog(choices, self)
+        if not dlg.exec():
+            return
+        added = [n for n in dlg.selected() if n]
+        for name in added:
+            self.db_privs.setdefault(name, set(READ_ONLY))
+        if added:
+            self._fill_db_list(select=added[0])
+            self._update_summary()
+
+    def _remove_databases(self):
+        names = [it.data(0, Qt.ItemDataRole.UserRole) for it in self.db_list.selectedItems()]
+        for name in names:
+            self.db_privs.pop(name, None)
+        self.current_db = None
+        self._fill_db_list()  # selects the first remaining database, or shows the empty hint
+        self._update_summary()
+
+    # summary / preview --------------------------------------------------------
+    def _update_summary(self, *_):
+        try:
+            n = len(self.statements())
+        except ValueError as e:
+            self.pending.setText(str(e))
+            return
+        self.pending.setText("No changes" if n == 0 else f"{n} change{'s' if n != 1 else ''} to apply "
+                             "(see SQL Preview)")
+        server = len(self.server_panel.privileges()) + self.grant_option.isChecked()
+        self.tabs.setTabText(1, f"Server Privileges ({server})" if server else "Server Privileges")
+        dbs = sum(1 for p in self.db_privs.values() if p)
+        self.tabs.setTabText(2, f"Privileges ({dbs})" if dbs else "Privileges")
 
     def _tab_changed(self, index):
         if self.tabs.widget(index) is self.preview:
@@ -231,7 +515,7 @@ class UserDialog(QDialog):
         if self.lock_supported and self.locked.isChecked() != self.orig_locked:
             sql.append(f"ALTER USER {acct} ACCOUNT {'LOCK' if self.locked.isChecked() else 'UNLOCK'}")
 
-        wanted = {p for p, box in self.server_boxes.items() if box.isChecked()}
+        wanted = self.server_panel.privileges()
         current = self.orig_global & set(SERVER_PRIVILEGES)
         if wanted - current:
             sql.append(f"GRANT {', '.join(sorted(wanted - current))} ON *.* TO {acct}")
@@ -242,9 +526,8 @@ class UserDialog(QDialog):
         elif not self.grant_option.isChecked() and self.orig_grant_option:
             sql.append(f"REVOKE GRANT OPTION ON *.* FROM {acct}")
 
-        rows = self._db_rows()
-        for name in sorted(set(rows) | set(self.orig_db)):
-            want = rows.get(name, set())
+        for name in sorted(set(self.db_privs) | set(self.orig_db)):
+            want = self.db_privs.get(name, set())
             have = self.orig_db.get(name, set()) & set(DATABASE_PRIVILEGES)
             target = f"{q(name)}.*"
             if want - have:
