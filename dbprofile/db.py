@@ -38,25 +38,36 @@ class ResultSet:
 
 
 DELIMITER_RE = re.compile(r"[ \t]*DELIMITER[ \t]+(\S+)[ \t]*(?:\r?\n|$)", re.IGNORECASE)
+TRAILING_COMMENT_RE = re.compile(r"[ \t]*((?:--[ \t]|#)[^\n]*|--$)")
 
 
-def split_statements(sql: str) -> list[str]:
-    """Split a script into statements.
+@dataclass
+class ScriptPart:
+    """One piece of a script: a statement, or a ``DELIMITER`` line (then ``sql`` is the new delimiter)."""
+    sql: str
+    delimiter: str | None = None  # delimiter that ended the statement; None at the end of the script
+    comment: str = ""  # a comment on the same line after the delimiter, e.g. "SELECT 1; -- note"
+    is_delimiter_line: bool = False
+
+
+def parse_script(sql: str) -> list[ScriptPart]:
+    """Split a script into statements and DELIMITER lines.
 
     Delimiters inside quotes and comments are ignored, and mysql-client style
     ``DELIMITER $$`` lines are honoured so routines with BEGIN ... END bodies work.
     """
-    statements, buf = [], []
+    parts, buf = [], []
     delimiter = ";"
     i, n = 0, len(sql)
     quote = None
     line_start = True
 
-    def flush():
+    def flush(ended_by=None):
         stmt = "".join(buf).strip()
         if stmt:
-            statements.append(stmt)
+            parts.append(ScriptPart(stmt, ended_by))
         buf.clear()
+        return bool(stmt)
 
     while i < n:
         ch = sql[i]
@@ -76,6 +87,7 @@ def split_statements(sql: str) -> list[str]:
             if m:
                 flush()
                 delimiter = m.group(1)
+                parts.append(ScriptPart(delimiter, is_delimiter_line=True))
                 i = m.end()
                 continue
         line_start = ch == "\n"
@@ -95,14 +107,24 @@ def split_statements(sql: str) -> list[str]:
             i = end
             continue
         elif sql.startswith(delimiter, i):
-            flush()
             i += len(delimiter)
+            if flush(delimiter):
+                # Keep "stmt; -- note" together instead of moving the note to the next statement.
+                m = TRAILING_COMMENT_RE.match(sql, i)
+                if m:
+                    parts[-1].comment = m.group(1)
+                    i = m.end(1)
             continue
         else:
             buf.append(ch)
         i += 1
     flush()
-    return statements
+    return parts
+
+
+def split_statements(sql: str) -> list[str]:
+    """The statements of a script, without delimiters and DELIMITER lines."""
+    return [p.sql for p in parse_script(sql) if not p.is_delimiter_line]
 
 
 def _read_result(cur, statement, start, max_rows) -> ResultSet:

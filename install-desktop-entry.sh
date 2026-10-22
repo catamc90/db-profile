@@ -7,7 +7,10 @@ DATA="${XDG_DATA_HOME:-$HOME/.local/share}"
 # The icon is drawn by the app itself, so render it with the app's Python (set up the venv like run.sh).
 if [ ! -x "$DIR/.venv/bin/python" ]; then
     python3 -m venv --system-site-packages "$DIR/.venv"
+fi
+if [ ! -f "$DIR/.venv/.requirements-installed" ] || [ "$DIR/requirements.txt" -nt "$DIR/.venv/.requirements-installed" ]; then
     "$DIR/.venv/bin/pip" install -q -r "$DIR/requirements.txt"
+    touch "$DIR/.venv/.requirements-installed"
 fi
 (cd "$DIR" && QT_QPA_PLATFORM=offscreen .venv/bin/python -m dbprofile.app_icon "$DATA/icons/hicolor" >/dev/null)
 touch "$DATA/icons/hicolor"  # tell desktops the icon theme changed

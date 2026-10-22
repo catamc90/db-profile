@@ -127,6 +127,23 @@ def new_query(p):
     _badge(p, GREEN, "+")
 
 
+def beautify(p):
+    """Indented code lines with a small sparkle."""
+    p.setPen(_pen(DARK, 1.4))
+    for x, y, w in ((2, 3, 7), (4.5, 6.5, 6), (4.5, 10, 4.5), (2, 13.5, 6)):
+        p.drawLine(QPointF(x, y), QPointF(x + w, y))
+    _fill(p, ORANGE)
+    star = QPainterPath()
+    cx, cy, r = 12.3, 4.2, 3.4
+    for k in range(8):
+        rad = r if k % 2 == 0 else r * 0.32
+        ang = math.pi / 4 * k - math.pi / 2
+        pt = QPointF(cx + rad * math.cos(ang), cy + rad * math.sin(ang))
+        star.moveTo(pt) if k == 0 else star.lineTo(pt)
+    star.closeSubpath()
+    p.drawPath(star)
+
+
 def drop_query(p):
     query(p)
     _badge(p, RED, "x")

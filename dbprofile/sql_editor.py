@@ -94,6 +94,32 @@ class SqlEditor(QPlainTextEdit):
         self.blockCountChanged.connect(lambda _: self.setViewportMargins(self.line_number_width(), 0, 0, 0))
         self.updateRequest.connect(self._update_numbers)
         self.setViewportMargins(self.line_number_width(), 0, 0, 0)
+        self.menu_actions = []  # shown above the standard Undo/Copy/Paste entries of the context menu
+
+    def contextMenuEvent(self, event):
+        menu = self.createStandardContextMenu(event.pos())
+        if self.menu_actions:
+            first = menu.actions()[0] if menu.actions() else None
+            menu.insertActions(first, self.menu_actions)
+            menu.insertSeparator(first)
+        menu.exec(event.globalPos())
+        menu.deleteLater()
+
+    def replace_text(self, text, selection_only):
+        """Replace the selection (or everything) with text as one undo step."""
+        cursor = self.textCursor()
+        if not selection_only:
+            cursor.select(cursor.SelectionType.Document)
+        cursor.beginEditBlock()
+        start = cursor.selectionStart()
+        cursor.insertText(text)
+        cursor.endEditBlock()
+        if selection_only:  # keep the formatted text selected
+            cursor.setPosition(start)
+            cursor.setPosition(start + len(text), cursor.MoveMode.KeepAnchor)
+        else:
+            cursor.setPosition(0)
+        self.setTextCursor(cursor)
 
     def line_number_width(self):
         digits = max(3, len(str(self.blockCount())))

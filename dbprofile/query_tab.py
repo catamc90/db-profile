@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QInputDialog, QLabel, QMessageBox, QSplitter, QTabWidget, QTextEdit, QToolBar, QVBoxLayout, QWidget,
 )
 
-from . import db, icons, saved_queries
+from . import db, icons, saved_queries, sql_format
 from .config import ConnectionConfig
 from .result_view import ResultModel, ResultView
 from .worker import run_async
@@ -69,6 +69,14 @@ class QueryTab(QWidget):
         self.stop_action.triggered.connect(self.stop)
         toolbar.addAction(self.stop_action)
         toolbar.addSeparator()
+        self.beautify_action = QAction(icons.icon("beautify"), "Beautify SQL", self)
+        self.beautify_action.setToolTip("Format the SQL, or only the selected text (Ctrl+Shift+F)")
+        self.beautify_action.setShortcut(QKeySequence("Ctrl+Shift+F"))
+        self.beautify_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.beautify_action.triggered.connect(self.beautify)
+        self.addAction(self.beautify_action)
+        toolbar.addAction(self.beautify_action)
+        toolbar.addSeparator()
         self.export_action = toolbar.addAction(icons.icon("export"), "Export Result", self._export_current)
 
         from .sql_editor import SqlEditor  # local import keeps module load light
@@ -77,6 +85,7 @@ class QueryTab(QWidget):
             self.editor.setPlainText(saved_queries.load(cfg.id, database, query_name))
             self.editor.document().setModified(False)
         self.editor.document().modificationChanged.connect(self.modified_changed.emit)
+        self.editor.menu_actions = [self.run_action, self.beautify_action]
         self.results = QTabWidget()
         self.results.setObjectName("subTabs")
         self.results.setDocumentMode(True)
@@ -211,6 +220,20 @@ class QueryTab(QWidget):
     def _log(self, text, color=None):
         style = f' style="color:{color}"' if color else ""
         self.messages.append(f"<div{style}>{text}</div><br>")
+
+    def beautify(self):
+        selection_only = self.editor.textCursor().hasSelection()
+        sql = self.editor.sql_to_run()
+        if not sql.strip():
+            return
+        try:
+            formatted = sql_format.beautify(sql)
+        except Exception as e:  # noqa: BLE001 - never lose the user's text over a formatting problem
+            QMessageBox.warning(self, "Beautify SQL", str(e))
+            return
+        if formatted != sql:
+            self.editor.replace_text(formatted, selection_only)
+        self.status("SQL beautified" + (" (selection)" if selection_only else ""))
 
     # saving -------------------------------------------------------------
     def is_modified(self):
