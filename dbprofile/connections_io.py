@@ -106,6 +106,9 @@ class ImportedConnection:
     supported: bool = True
     password_ok: bool = True
     notes: list[str] = field(default_factory=list)
+    # Whether the file contained the secret, so an update keeps a saved one when it didn't
+    has_password: bool = False
+    has_ssh_secret: bool = False
 
 
 def _bool(value) -> bool:
@@ -144,6 +147,7 @@ def read_ncx(path: str) -> list[ImportedConnection]:
             cfg.password = password
         if not cfg.save_password:
             cfg.password = ""
+        item.has_password = bool(cfg.password)
         if _bool(a.get("SSH")):
             _read_ssh(a, cfg, item)
         if _bool(a.get("SSL")):
@@ -178,6 +182,7 @@ def _read_ssh(a, cfg, item):
         cfg.ssh_passphrase = secret
     else:
         cfg.ssh_password = secret
+    item.has_ssh_secret = bool(secret)
     item.notes.append(f"SSH tunnel via {cfg.ssh_user + '@' if cfg.ssh_user else ''}{cfg.ssh_host}")
     if cfg.ssh_auth == "key" and _is_windows_path(cfg.ssh_key_file):
         item.notes.append(f"Private key path {cfg.ssh_key_file} is a Windows path; update it after importing")
@@ -203,7 +208,9 @@ def read_json(path: str) -> list[ImportedConnection]:
     result = []
     for row in rows:
         values = {k: v for k, v in row.items() if k in fields and k != "id"}
-        result.append(ImportedConnection(ConnectionConfig(**values)))
+        cfg = ConnectionConfig(**values)
+        result.append(ImportedConnection(cfg, has_password=bool(cfg.password),
+                                         has_ssh_secret=bool(cfg.ssh_password or cfg.ssh_passphrase)))
     return result
 
 
@@ -216,6 +223,48 @@ def read_file(path: str) -> list[ImportedConnection]:
         return read_ncx(path)
     except ET.ParseError:
         return read_json(path)
+
+
+# --- updating existing connections ---------------------------------------------------------
+# What a changed field is called in "Updates host, password, SSH"
+_FIELD_LABELS = {"name": "name", "host": "host", "port": "port", "user": "user", "password": "password",
+                 "save_password": "password", "database": "database"}
+
+
+def _field_label(name):
+    return "SSH" if name.startswith("ssh_") else "SSL" if name.startswith("ssl_") else _FIELD_LABELS.get(name, name)
+
+
+def find_existing(cfg: ConnectionConfig, existing: list[ConnectionConfig]):
+    """The saved connection an imported one updates: the one with the same name (ignoring case)."""
+    return next((e for e in existing if e.name.strip().lower() == cfg.name.strip().lower()), None)
+
+
+def merge(item: ImportedConnection, old: ConnectionConfig) -> tuple[ConnectionConfig, list[str]]:
+    """The updated connection and the labels of what changed (empty: already up to date).
+
+    The imported settings win, except that secrets the file doesn't contain and local file paths
+    the file only has as Windows paths are kept from the saved connection. The id is kept, so the
+    connection keeps its saved queries.
+    """
+    new = ConnectionConfig(**{f: getattr(item.config, f) for f in ConnectionConfig.__dataclass_fields__})
+    new.id = old.id
+    if not item.has_password:
+        new.password, new.save_password = old.password, old.save_password
+    if not item.has_ssh_secret:
+        new.ssh_password, new.ssh_passphrase = old.ssh_password, old.ssh_passphrase
+        new.ssh_save_password = old.ssh_save_password
+    for path_field in ("ssh_key_file", "ssl_ca", "ssl_cert", "ssl_key"):
+        value = getattr(new, path_field)
+        if value and _is_windows_path(value) and getattr(old, path_field):
+            setattr(new, path_field, getattr(old, path_field))
+    changed = []
+    for name in ConnectionConfig.__dataclass_fields__:
+        if name != "id" and getattr(new, name) != getattr(old, name):
+            label = _field_label(name)
+            if label not in changed:
+                changed.append(label)
+    return new, changed
 
 
 # --- export --------------------------------------------------------------------------------

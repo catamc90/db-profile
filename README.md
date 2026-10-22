@@ -24,7 +24,7 @@ On GNOME with Wayland, the app runs through XWayland so that GNOME draws its nor
 - **Import / Export Connections** (File menu, or right-click the connection list):
   - Imports **Navicat `.ncx` files**, including saved passwords from Navicat 12 and later (AES) and Navicat 11 and earlier (Blowfish). MySQL and MariaDB connections are imported; other types are listed and skipped.
   - Tunnels (SSH, HTTP) and SSL settings are not imported; the import list flags each affected connection.
-  - Existing connections can be skipped, renamed or replaced.
+  - Re-importing updates existing connections (matched by name): the list shows what each one changes ("Updates host, password"), "New" or "Up to date". Updates keep the connection's saved queries, any saved password or SSH secret the file doesn't contain, and your local key/certificate paths when the file only has Windows paths. You can also import duplicates as copies or skip them.
   - Exports to `.ncx`, which Navicat can import, or to DB Profile `.json`. Export files are saved with mode 600.
 - **Object tree**: connection → databases → **Tables / Views / Functions / Queries** groups, like Navicat, loaded when you expand a node. Right-click to create or drop a database, or to truncate or drop a table.
 - **Objects tab**: a permanent first tab. Selecting a database in the tree lists its tables and views here, with row count, engine, size, last update, collation and comment. You can sort, filter by name, and select several tables to open them all into tabs at once (double-click, Enter, or right-click).

@@ -711,7 +711,7 @@ class MainWindow(QMainWindow):
             dlg.load(path)
         if not dlg.exec():
             return
-        added = replaced = 0
+        added = updated = 0
         for cfg, old in dlg.result_plan():
             if old is not None:
                 top = self._top_item(old.id)
@@ -721,13 +721,13 @@ class MainWindow(QMainWindow):
                     top.setText(0, cfg.name)
                     top.setToolTip(0, cfg.address())
                 self.connections[self.connections.index(old)] = cfg
-                replaced += 1
+                updated += 1
             else:
                 self.connections.append(cfg)
                 self._add_connection_item(cfg)
                 added += 1
         save_connections(self.connections)
-        self._status(f"Imported connections: {added} added, {replaced} replaced")
+        self._status(f"Imported connections: {added} added, {updated} updated")
 
     def export_connections(self, selected_id=None):
         if not self.connections:
